@@ -1,0 +1,11 @@
+[2026-03-18 10:35:51] File: screenshot_10-35-51_Visual.png      | App: Visual          | Copied: True  | Path: ...\Kyoma Screenshots\2026-03-18\screenshot_10-35-51_Visual.png
+[2026-03-18 10:36:19] File: screenshot_10-36-19_Discord.png     | App: Discord         | Copied: True  | Path: ...Kyoma Screenshots\2026-03-18\screenshot_10-36-19_Discord.png
+[2026-03-18 12:42:25] File: noob_12-42-25_Visual.png            | App: Visual          | Copied: True  | Path: ...\Kyoma\Kyoma Screenshots\2026-03-18\noob_12-42-25_Visual.png
+[2026-03-18 12:42:50] File: ss_2_12-42-50_Visual.png            | App: Visual          | Copied: True  | Path: ...\Kyoma\Kyoma Screenshots\2026-03-18\ss_2_12-42-50_Visual.png
+[2026-03-18 12:42:50] File: screenshot_12-42-50_Visual.png      | App: Visual          | Copied: True  | Path: ...\Kyoma Screenshots\2026-03-18\screenshot_12-42-50_Visual.png
+[2026-04-30 10:50:48] File: hello_10-50-47_Visual.png           | App: Visual          | Copied: True  | Path: ...Kyoma\Kyoma Screenshots\2026-04-30\hello_10-50-47_Visual.png
+[2026-06-01 19:24:23] File: screenshot_19-24-23_Visual.png      | App: Visual          | Copied: True  | Path: ...\Kyoma Screenshots\2026-06-01\screenshot_19-24-23_Visual.png
+[2026-06-01 21:01:15] File: screenshot1png_21-01-15_Google.png  | App: Google          | Copied: True  | Path: ...ma Screenshots\2026-06-01\screenshot1png_21-01-15_Google.png
+[2026-06-02 00:32:59] File: game_00-32-58_Google.png            | App: Google          | Copied: True  | Path: ...\Kyoma\Kyoma Screenshots\2026-06-02\game_00-32-58_Google.png
+[2026-08-02 22:09:26] File: test success_22-09-26_Google.png    | App: Google          | Copied: True  | Path: ...yoma Screenshots\2026-08-02\test success_22-09-26_Google.png
+[2026-08-03 22:54:25] File: current_screenshot_22-54-25_Google.png | App: Google          | Copied: True  | Path: ...creenshots\2026-08-03\current_screenshot_22-54-25_Google.png

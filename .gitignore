@@ -1,0 +1,132 @@
+# ============================================================
+# LocalAIVtuber2 - Root .gitignore
+# ============================================================
+
+# ──────────────────────────────────────────────────────────
+# 🤖 AI MODEL WEIGHTS  (too large for GitHub, re-downloadable)
+# ──────────────────────────────────────────────────────────
+*.gguf
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.bin
+
+# GPT-SoVITS pretrained weights (re-downloaded by download_tts_weights.py)
+backend/services/TTS/GPTsovits/GPT_SoVITS/pretrained_models/
+backend/services/TTS/GPTsovits/GPT_SoVITS/pretrained_sovits_weights/
+backend/services/TTS/GPTsovits/GPT_SoVITS/BigVGAN_pretrained_models/
+
+# ──────────────────────────────────────────────────────────
+# 🎭 CHARACTER MODELS  (large binary assets)
+# ──────────────────────────────────────────────────────────
+# VRM models — comment this out if you WANT to push small VRM files
+backend/services/Character/VRM3D/models/*.vrm
+backend/services/Character/VRM3D/models/*.glb
+
+# Live2D models — comment out if you want to keep them
+# backend/services/Character/live2D/models/
+
+# ──────────────────────────────────────────────────────────
+# 🐍 PYTHON
+# ──────────────────────────────────────────────────────────
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ──────────────────────────────────────────────────────────
+# 📦 NODE / FRONTEND
+# ──────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ──────────────────────────────────────────────────────────
+# 🔧 ESP32 BUILD ARTIFACTS
+# ──────────────────────────────────────────────────────────
+esp32_firmware/.pio/
+esp32_firmware/.vscode/
+
+# ──────────────────────────────────────────────────────────
+# ⚙️  SECRETS & USER SETTINGS
+# ──────────────────────────────────────────────────────────
+# settings.json contains user-specific paths — keep a template instead
+backend/settings.json
+
+# ──────────────────────────────────────────────────────────
+# 🎵 AUDIO / MEDIA  (runtime generated or large)
+# ──────────────────────────────────────────────────────────
+backend/services/Input/voice_recording.wav
+backend/tmp/
+tmp/
+*.tmp
+
+# But KEEP reference audio for voice cloning (small, user-created)
+# !backend/services/TTS/GPTsovits/models/*/reference_audio.*
+
+# ──────────────────────────────────────────────────────────
+# 📝 LOGS
+# ──────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ──────────────────────────────────────────────────────────
+# 🖼️  SCREENSHOTS & GENERATED IMAGES
+# ──────────────────────────────────────────────────────────
+*.png
+*.jpg
+*.jpeg
+# But KEEP the frontend public assets
+!frontend/public/**/*.png
+!frontend/public/**/*.jpg
+!frontend/src/assets/**
+
+# ──────────────────────────────────────────────────────────
+# 🗜️  ARCHIVES
+# ──────────────────────────────────────────────────────────
+*.zip
+*.7z
+*.tar
+*.gz
+*.rar
+
+# ──────────────────────────────────────────────────────────
+# 💻 OS & EDITOR
+# ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ──────────────────────────────────────────────────────────
+# 🔌 RVC PLUGIN (large runtime binaries)
+# ──────────────────────────────────────────────────────────
+backend/plugins/rvc/runtime/
+backend/plugins/rvc/*.exe
+
+# ──────────────────────────────────────────────────────────
+# 📦 PACKAGE LOCKS (optional — keep for reproducibility)
+# ──────────────────────────────────────────────────────────
+# Uncomment below if you want to exclude lock files:
+# package-lock.json
+# backend/package-lock.json

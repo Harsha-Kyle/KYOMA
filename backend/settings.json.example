@@ -1,0 +1,39 @@
+{
+    "frontend.character.selectedLive2DModel": "/api/character/files/live2D/models/YOUR_MODEL/YOUR_MODEL.model3.json",
+    "frontend.character.selectedVRMModel": "/api/character/files/VRM3D/models/YOUR_MODEL.vrm",
+    "llm.showMonitor": true,
+    "llm.keep_model_loaded": true,
+    "llm.model_filename": "YOUR_MODEL_FOLDER_NAME",
+    "llm.system_prompt": "",
+    "llm.enableMemoryRetrieval": true,
+    "frontend.character.renderModel": false,
+    "tts.provider": "gpt-sovits",
+    "tts.voice": "YOUR_VOICE_NAME",
+    "frontend.character.live2D.xPosition": 50,
+    "frontend.character.live2D.yPosition": 100,
+    "frontend.character.live2D.scale": 0.3,
+    "frontend.character.3d2dSwitch": false,
+    "tts.gptsovits.voice": "YOUR_VOICE_NAME",
+    "stream.yt.videoid": "",
+    "frontend.stream.setlist": [
+        {
+            "nodeType": "systemPrompt",
+            "settings": { "systemprompt": "" }
+        },
+        {
+            "nodeType": "promptedResponse",
+            "settings": { "prompt": "" }
+        },
+        {
+            "nodeType": "chat",
+            "settings": { "duration": 60 }
+        },
+        {
+            "nodeType": "sing",
+            "settings": { "songName": "" }
+        }
+    ],
+    "load-llm-cpu": false,
+    "llm.repeat_penalty": 1.1,
+    "disable-pipeline": true
+}

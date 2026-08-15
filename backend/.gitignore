@@ -1,0 +1,8 @@
+venv
+*.log
+*.png
+*__pycache__
+*.zip
+*.exe
+settings.json
+*.tmp

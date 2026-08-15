@@ -1,0 +1,71 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebSocketsClient.h>
+#include <driver/i2s.h>
+#include <U8g2lib.h>
+#include <ArduinoJson.h>
+
+// ================= Config =================
+const char* ssid = "OPPO F19 Pro+";
+const char* password = "3wtisktj";
+const char* ws_host = "192.168.56.190"; // PC IP Address
+const uint16_t ws_port = 8000;
+const char* ws_path = "/ws/esp32";
+
+// ================= Pins =================
+#define I2S_BCLK    9   // D9
+#define I2S_LRC     10  // D10
+#define I2S_DOUT    20  // D7 (MAX98357A DIN)
+#define I2S_DIN     8   // D8 (INMP441 SD)
+#define I2C_SDA     6   // D4
+#define I2C_SCL     7   // D5
+
+// ================= State =================
+enum AIState {
+  STATE_IDLE,
+  STATE_LISTENING,
+  STATE_THINKING,
+  STATE_SPEAKING
+};
+AIState currentState = STATE_IDLE;
+
+WebSocketsClient webSocket;
+
+// Use Software I2C constructor - it is much more robust against I2C line issues/timing
+U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, I2C_SCL, I2C_SDA, U8X8_PIN_NONE);
+
+// I2S Configuration
+#define SAMPLE_RATE     16000
+#define I2S_PORT        I2S_NUM_0
+
+void i2s_install() {
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_TX),
+        .sample_rate = SAMPLE_RATE,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 8,
+        .dma_buf_len = 1024,
+        .use_apll = false,
+        .tx_desc_auto_clear = true,
+        .fixed_mclk = 0
+    };
+
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_BCLK,
+        .ws_io_num = I2S_LRC,
+        .data_out_num = I2S_DOUT,
+        .data_in_num = I2S_DIN
+    };
+
+    i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+    i2s_set_pin(I2S_PORT, &pin_config);
+    i2s_zero_dma_buffer(I2S_PORT);
+}
+
+void drawEyes() {
+    u8g2.clearBuffer();
+
+<truncated 4012 bytes>
