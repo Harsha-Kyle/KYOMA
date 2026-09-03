@@ -21,7 +21,7 @@ const char* ws_path  = "/ws/esp32";
 #define I2C_SDA         6
 #define I2C_SCL         7
 
-#define SPK_BCLK  8
+#define SPK_BCLK  4
 #define SPK_LRC   5
 #define SPK_DIN   3
 
