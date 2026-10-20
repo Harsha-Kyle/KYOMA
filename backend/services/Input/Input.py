@@ -50,6 +50,7 @@ class VoiceInput:
             self.whisper_model = None
             self.vad_model = None
         self.processing_lock = asyncio.Lock()
+        self.is_muted = False
 
     def _reset_buffers(self):
         self.sentence_audio_buffer = []
@@ -57,17 +58,41 @@ class VoiceInput:
         self.silent_samples = 0
         self.started_speaking = False
 
+    def mute(self):
+        """Immediately discard incoming audio and purge all buffers."""
+        self.is_muted = True
+        self._reset_buffers()
+        if hasattr(self, 'vad_iterator') and self.vad_iterator:
+            try:
+                self.vad_iterator.reset_states()
+            except Exception:
+                pass
+        logger.info("[STT] VoiceInput muted and buffers purged")
+
+    def unmute(self):
+        """Resume accepting audio and reset state cleanly."""
+        self._reset_buffers()
+        if hasattr(self, 'vad_iterator') and self.vad_iterator:
+            try:
+                self.vad_iterator.reset_states()
+            except Exception:
+                pass
+        self.is_muted = False
+        logger.info("[STT] VoiceInput unmuted")
+
     async def start_streaming(self, clients):
         if self.running:
             return
         self.running = True
+        self.is_muted = False
+        self._reset_buffers()
         logger.info("Started recording")
 
         loop = asyncio.get_event_loop()
 
         def audio_callback(indata, frames, time, status):
-            if self.esp32_mode:
-                return  # Ignore local mic if ESP32 is connected
+            if not self.running or self.is_muted or self.esp32_mode:
+                return  # Drop audio immediately when stopped, muted, or in ESP32 mode
             audio_np = indata.flatten().astype(np.float32) / 32768.0
             asyncio.run_coroutine_threadsafe(
                 self._process_audio(audio_np, clients), loop
@@ -77,10 +102,13 @@ class VoiceInput:
             while self.running:
                 await asyncio.sleep(0.1)
 
+        self._reset_buffers()
         logger.info("Stopped recording")
 
     def stop_streaming(self):
         self.running = False
+        self._reset_buffers()
+
 
     def set_esp32_mode(self, mode: bool):
         self.esp32_mode = mode
@@ -166,8 +194,9 @@ class VoiceInput:
                                 except Exception:
                                     dead_clients.add(client)
                             clients -= dead_clients
-                            # In ESP32 mode, also trigger the autonomous LLM→TTS pipeline
-                            if self.esp32_mode and self.esp32_pipeline_callback:
+                            # In ESP32 mode, trigger the autonomous LLM→TTS pipeline ONLY if no frontend WebUI client is connected.
+                            # If frontend is connected, the frontend will handle it via its WebSocket event.
+                            if self.esp32_mode and self.esp32_pipeline_callback and len(clients) == 0:
                                 asyncio.create_task(self.esp32_pipeline_callback(transcribed_text))
 
     def process_speech(self, audio_data):
@@ -187,10 +216,12 @@ class VoiceInput:
             
         import re
         clean_text = re.sub(r'[^\w\s]', '', transcribed_text).strip().lower()
-        if clean_text in self.whisper_filter_list:
+        # If after stripping all non-alphanumeric chars nothing is left (e.g. ". . . . ." or "..."), drop it
+        if not clean_text or clean_text in self.whisper_filter_list:
             return
             
-        return transcribed_text
+        return transcribed_text.strip()
+
 
     def run_cli(self):
         print("🎙️ Running in CLI mode. Press Ctrl+C to stop.")

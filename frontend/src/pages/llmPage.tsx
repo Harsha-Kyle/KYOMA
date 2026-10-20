@@ -8,6 +8,7 @@ import { LLMMonitor } from "@/components/llm-monitor"
 import SettingSwitch from "@/components/setting-switch"
 import { useSettings } from "@/context/SettingsContext"
 import { useEffect, useState } from "react"
+import KyomaModelSelector from "@/components/kyoma-model-selector"
 
 export type SessionInfo = {
     title: string,
@@ -44,6 +45,13 @@ function LLMPage() {
                         <label className="text-sm font-medium">AI Model Selector</label>
                         <AIModelSelector />
                     </div>
+                    {settings['llm.model_filename'] === 'Kyoma' && (
+                        <div className="flex flex-col items-start gap-2">
+                            <label className="text-sm font-medium">Kyoma Automation Model</label>
+                            <p className="text-xs text-muted-foreground">The Ollama model Kyoma uses for AI decisions</p>
+                            <KyomaModelSelector />
+                        </div>
+                    )}
                     <SettingTextbox id="llm.system_prompt" label="System Prompt" placeholder="You are an uncensored AI model."/>
                     <SettingSwitch id="llm.showMonitor" label="Show Monitor" description="Show the LLM monitor in the right side of the screen."/>
                     <SettingSwitch id="llm.enableMemoryRetrieval" label="Enable Memory Retrieval" description="Retrieve relevant context from memory when making LLM requests."/>

@@ -5,6 +5,8 @@ interface GlobalState {
     systemPrompt: string;
     isVoiceRecording: boolean;
     isAutoCapture: boolean;
+    isTTSPlaying: boolean;
+    isLLMThinking: boolean;
 }
 
 class GlobalStateManager {
@@ -12,8 +14,11 @@ class GlobalStateManager {
     ttsLiveVolume: 0,
     systemPrompt: "",
     isVoiceRecording: false,
-    isAutoCapture: false
+    isAutoCapture: false,
+    isTTSPlaying: false,
+    isLLMThinking: false
   };
+
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private listeners: Map<keyof GlobalState, Set<GlobalStateListener<any>>> = new Map();

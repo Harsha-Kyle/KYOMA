@@ -10,6 +10,8 @@ import { Panel } from './panel';
 import { chatManager } from '@/lib/chatManager';
 import { SidePanel } from './side-panel';
 import { globalStateManager } from '@/lib/globalStateManager';
+import { apiFetch } from '@/lib/api-client';
+
 
 interface MonitorInfo {
   index: number;
@@ -69,7 +71,7 @@ export function VisionManager({ className }: VisionManagerProps) {
   useEffect(() => {
     const loadMonitors = async () => {
       try {
-        const res = await fetch('/api/monitors');
+        const res = await apiFetch('/api/monitors');
         const data = await res.json();
 
         if (data.monitors) {
@@ -126,7 +128,7 @@ export function VisionManager({ className }: VisionManagerProps) {
     setLoading(true);
 
     try {
-      const res = await fetch(`/api/screenshot?monitor_index=${selectedMonitor}&ocr_scale_factor=${ocrScaleFactor}&skip_ocr=${skipOcr}`);
+      const res = await apiFetch(`/api/screenshot?monitor_index=${selectedMonitor}&ocr_scale_factor=${ocrScaleFactor}&skip_ocr=${skipOcr}`);
       const data = await res.json();
 
       if (data.success) {

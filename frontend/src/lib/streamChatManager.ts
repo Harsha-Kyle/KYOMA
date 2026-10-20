@@ -1,3 +1,5 @@
+import { apiFetch, getApiKey } from "./api-client";
+
 export class StreamChatManager {
     private socket: WebSocket | null = null;
     private isFetching: boolean = false;
@@ -6,14 +8,19 @@ export class StreamChatManager {
 
     async startChatFetch(): Promise<void> {
         try {
-            const response = await fetch("/api/streamChat/yt/start", {
+            const response = await apiFetch("/api/streamChat/yt/start", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
             });
 
             if (response.ok) {
-                this.socket = new WebSocket(`ws://${window.location.host}/ws/streamChat`);
+                const key = getApiKey();
+                const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
+                const wsUrl = `${wsProtocol}://${window.location.host}/ws/streamChat${key ? `?api_key=${encodeURIComponent(key)}` : ""}`;
+                this.socket = new WebSocket(wsUrl);
                 this.isFetching = true;
+
+
 
                 this.socket.onmessage = (event) => {
                     const message = JSON.parse(event.data);
@@ -33,9 +40,10 @@ export class StreamChatManager {
 
     async stopChatFetch(): Promise<void> {
         try {
-            const response = await fetch("/api/streamChat/yt/stop", {
+            const response = await apiFetch("/api/streamChat/yt/stop", {
                 method: "POST",
             });
+
 
             if (response.ok && this.socket) {
                 this.isFetching = false;

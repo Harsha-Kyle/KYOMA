@@ -28,6 +28,8 @@ from fastapi import FastAPI, Request, Response, WebSocket, HTTPException, File, 
 from fastapi.websockets import WebSocketDisconnect
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+import secrets
 import uvicorn
 from services.LLM.LLM import LLM
 from pydantic import BaseModel
@@ -35,6 +37,11 @@ from datetime import datetime
 import json
 from typing import Any, Dict, List
 import mss
+try:
+    from backend.auth import API_KEY
+except ImportError:
+    from auth import API_KEY
+
 import traceback
 import threading
 import queue
@@ -71,9 +78,54 @@ else:
     logger.warning("RVC server skipped: runtime or script not found. Please install the RVC standalone pack if required.")
 
 app = FastAPI()
+
+class APIKeyMiddleware(BaseHTTPMiddleware):
+    EXEMPT_PATHS = {
+        "/health", "/docs", "/openapi.json", "/", "/black.png", "/api/status",
+        "/api/tts", "/api/tts/provider", "/api/tts/voices", "/api/tts/change-voice",
+        "/api/tts/kokoro/voices", "/api/tts/kokoro/speed"
+    }
+
+    async def dispatch(self, request, call_next):
+        if (
+            request.scope.get("type") == "websocket"
+            or request.url.path in self.EXEMPT_PATHS
+            or request.url.path.startswith("/assets")
+            or request.url.path.startswith("/resource")
+            or request.url.path.startswith("/api/character/files")
+        ):
+            return await call_next(request)
+
+        key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+        if not key or not secrets.compare_digest(key, API_KEY):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        return await call_next(request)
+
+app.add_middleware(APIKeyMiddleware)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+@app.get("/api/status")
+async def get_server_status():
+    status = startup_progress.get_status()
+    status["app"] = "KYOMA AI VTuber"
+    status["tts_provider"] = tts.get_provider() if 'tts' in globals() else "none"
+    status["services"] = {
+        "llm": True if 'llm' in globals() else False,
+        "voice_input": True if 'voice_input' in globals() else False,
+        "tts": True if 'tts' in globals() else False,
+        "memory": True if 'memory' in globals() else False,
+        "character": True if 'character_manager' in globals() else False,
+    }
+    return JSONResponse(content=status)
+
 static_files_path = os.path.abspath("../frontend/dist")
 app.mount("/assets", StaticFiles(directory="../frontend/dist/assets"), name="assets")
 app.mount("/resource", StaticFiles(directory="../frontend/dist/resource"), name="resource")
+
 
 # Initialize Services
 start_time = time.time()
@@ -135,9 +187,24 @@ async def stop_recording():
         asyncio.create_task(broadcast_esp32_state("idle"))
     return Response(status_code=200)
 
+@app.post("/api/record/mute")
+async def mute_recording():
+    voice_input.mute()
+    return Response(status_code=200)
+
+@app.post("/api/record/unmute")
+async def unmute_recording():
+    voice_input.unmute()
+    return Response(status_code=200)
+
+
 @app.websocket("/ws/audio")
 async def websocket_audio(websocket: WebSocket):
     await websocket.accept()
+    key = websocket.query_params.get("api_key")
+    if not key or not secrets.compare_digest(key, API_KEY):
+        await websocket.close(code=1008)
+        return
     clients.add(websocket)
     try:
         while True:
@@ -154,12 +221,17 @@ async def websocket_audio(websocket: WebSocket):
 @app.websocket("/ws/esp32")
 async def websocket_esp32(websocket: WebSocket):
     await websocket.accept()
+    key = websocket.query_params.get("api_key")
+    if not key or not secrets.compare_digest(key, API_KEY):
+        await websocket.close(code=1008)
+        return
     esp32_clients.add(websocket)
+
     logger.info("ESP32 Connected via WebSocket")
     
-    # Switch VoiceInput into ESP32 mode and mark as running so audio is accepted.
-    voice_input.set_esp32_mode(True)
-    voice_input.running = True
+    # Temporarily disabled: Switch VoiceInput into ESP32 mode and mark as running.
+    # voice_input.set_esp32_mode(True)
+    # voice_input.running = True
 
     # Register the autonomous pipeline callback so Whisper results drive LLM+TTS.
     voice_input.esp32_pipeline_callback = run_esp32_pipeline
@@ -181,10 +253,10 @@ async def websocket_esp32(websocket: WebSocket):
                 logger.info("ESP32 WebSocket closed cleanly")
                 break
 
-            # Binary audio data from the microphone
-            raw = message.get("bytes")
-            if raw:
-                voice_input.process_esp32_audio(raw, clients)
+            # Binary audio data from the microphone (ignored for now to use laptop mic)
+            # raw = message.get("bytes")
+            # if raw:
+            #     voice_input.process_esp32_audio(raw, clients)
 
             # Text commands (e.g. debug messages sent by ESP32 — ignore safely)
             # raw text is available at message.get("text") if needed
@@ -196,9 +268,9 @@ async def websocket_esp32(websocket: WebSocket):
     finally:
         esp32_clients.discard(websocket)
         voice_input.esp32_pipeline_callback = None
-        if len(esp32_clients) == 0:
-            voice_input.set_esp32_mode(False)
-            voice_input.running = False
+        # if len(esp32_clients) == 0:
+        #     voice_input.set_esp32_mode(False)
+        #     voice_input.running = False
         try:
             await websocket.close()
         except RuntimeError:
@@ -427,6 +499,10 @@ async def get_screenshot(monitor_index: int = 1, ocr_scale_factor: float = 0.5, 
 @app.websocket("/ws/streamChat")
 async def websocket_chat(websocket: WebSocket):
     await websocket.accept()
+    key = websocket.query_params.get("api_key")
+    if not key or not secrets.compare_digest(key, API_KEY):
+        await websocket.close(code=1008)
+        return
     chat_clients.add(websocket)
     try:
         while True:
@@ -687,11 +763,11 @@ async def get_all_downloads():
     """Get status of all downloads"""
     return JSONResponse(content={"downloads": download_progress})
 
-class DeleteModelRequest(BaseModel):
+class DeleteLLMModelRequest(BaseModel):
     model_id: str  # This could be displayName or fileName
 
 @app.delete("/api/llm/models/delete")
-async def delete_model(request: DeleteModelRequest):
+async def delete_model(request: DeleteLLMModelRequest):
     """Delete a downloaded model file"""
     try:
         # Find the model in the available models
@@ -763,6 +839,104 @@ class ChangeVoiceRequest(BaseModel):
 
 class DeleteVoiceRequest(BaseModel):
     name: str
+
+class ChangeTTSProviderRequest(BaseModel):
+    provider: str  # "gpt-sovits" | "kokoro"
+
+class KokoroSpeedRequest(BaseModel):
+    speed: float
+
+@app.get("/api/tts/provider")
+async def get_tts_provider():
+    """Return the currently active TTS provider key."""
+    return JSONResponse(content={"provider": tts.get_provider()})
+
+@app.post("/api/tts/provider")
+async def set_tts_provider(request: ChangeTTSProviderRequest):
+    """Switch the active TTS provider at runtime."""
+    try:
+        result = tts.set_provider(request.provider)
+        settings_manager.update_settings({"tts.provider": request.provider})
+        return JSONResponse(content=result)
+    except ValueError as ve:
+        return JSONResponse(status_code=400, content={"error": str(ve)})
+    except Exception as e:
+        logger.error(f"Error switching TTS provider: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "Failed to switch provider"})
+
+@app.get("/api/tts/kokoro/voices")
+async def get_kokoro_voices():
+    """Return all built-in Kokoro voices."""
+    try:
+        from services.TTS.Kokoro.KokoroTTS import VOICE_LANG_MAP
+        engine = tts._get_instance("kokoro")
+        voices = engine.get_available_voices()
+        voice_info = []
+        for v in voices:
+            prefix = v[:3]
+            lang = VOICE_LANG_MAP.get(prefix, "Other")
+            voice_info.append({"id": v, "display": f"{lang} — {v}", "lang": lang})
+        return JSONResponse(content={
+            "voices": voice_info,
+            "current_voice": engine.current_voice,
+        })
+    except Exception as e:
+        logger.error(f"Error getting Kokoro voices: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "Failed to get Kokoro voices"})
+
+@app.post("/api/tts/kokoro/speed")
+async def set_kokoro_speed(request: KokoroSpeedRequest):
+    """Set the Kokoro speech speed (0.5 – 2.0)."""
+    try:
+        engine = tts._get_instance("kokoro")
+        engine.set_speed(request.speed)
+        settings_manager.update_settings({"tts.kokoro.speed": request.speed})
+        return JSONResponse(content={"message": f"Kokoro speed set to {engine.speed}"})
+    except Exception as e:
+        logger.error(f"Error setting Kokoro speed: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "Failed to set speed"})
+
+@app.get("/api/kyoma/model")
+async def get_kyoma_model():
+    """Return the current Kyoma automation model."""
+    try:
+        if hasattr(llm, 'llm') and isinstance(llm.llm, __import__('services.LLM.KyomaLLM', fromlist=['KyomaLLM']).KyomaLLM):
+            if llm.llm.kyoma_module:
+                model = getattr(llm.llm.kyoma_module, 'OLLAMA_MODEL', 'gemma4:e2b')
+                return JSONResponse(content={"model": model})
+        # Fall back to reading from config
+        import json as _j, os as _os
+        cfg = _os.path.join(_os.path.dirname(__file__), '..', 'Kyoma', 'kyoma_config.json')
+        if _os.path.exists(cfg):
+            with open(cfg) as f:
+                return JSONResponse(content={"model": _j.load(f).get('ollama_model', 'gemma4:e2b')})
+        return JSONResponse(content={"model": "gemma4:e2b"})
+    except Exception as e:
+        return JSONResponse(content={"model": "gemma4:e2b"})
+
+class KyomaModelRequest(BaseModel):
+    model: str
+
+@app.post("/api/kyoma/model")
+async def set_kyoma_model(request: KyomaModelRequest):
+    """Change the Ollama model used by Kyoma automation."""
+    try:
+        if hasattr(llm, 'llm') and llm.llm is not None:
+            from services.LLM.KyomaLLM import KyomaLLM as _KyomaLLM
+            if isinstance(llm.llm, _KyomaLLM) and llm.llm.kyoma_module:
+                llm.llm.kyoma_module.set_ollama_model(request.model)
+                logger.info(f"[Kyoma] Model changed to {request.model}")
+                return JSONResponse(content={"message": f"Kyoma model set to {request.model}"})
+        # Kyoma module not loaded yet — write config directly
+        import json as _j, os as _os
+        cfg = _os.path.join(_os.path.dirname(__file__), '..', 'Kyoma', 'kyoma_config.json')
+        with open(cfg, 'w') as f:
+            _j.dump({'ollama_model': request.model}, f)
+        logger.info(f"[Kyoma] Model config saved: {request.model}")
+        return JSONResponse(content={"message": f"Kyoma model config saved: {request.model}"})
+    except Exception as e:
+        logger.error(f"Error setting Kyoma model: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/api/tts/voices")
 async def get_available_voices():
@@ -899,17 +1073,10 @@ async def get_vrm_models():
 async def serve_character_files(file_path: str, request: Request):
     """Serve character model files from backend"""
     try:
-        # Get the full request path
-        full_path = request.url.path
-        
-        # Get the absolute file path using CharacterManager
-        absolute_path = character_manager.get_file_path(full_path)
-        
+        absolute_path = character_manager.get_file_path(file_path)
         if absolute_path is None:
             raise HTTPException(status_code=404, detail="File not found")
-        
         return FileResponse(str(absolute_path))
-        
     except HTTPException:
         raise
     except Exception as e:
@@ -957,11 +1124,11 @@ async def upload_live2d_folder(files: List[UploadFile] = File(...)):
         logger.error(f"Error uploading Live2D model folder: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "Failed to upload model folder"})
 
-class DeleteModelRequest(BaseModel):
+class DeleteCharacterFileRequest(BaseModel):
     path: str
 
 @app.post("/api/character/vrm/delete")
-async def delete_vrm_model(request: DeleteModelRequest):
+async def delete_vrm_model(request: DeleteCharacterFileRequest):
     """Delete a VRM model"""
     try:
         success, message = character_manager.delete_vrm_model(request.path)
@@ -976,7 +1143,7 @@ async def delete_vrm_model(request: DeleteModelRequest):
         return JSONResponse(status_code=500, content={"error": "Failed to delete model"})
 
 @app.post("/api/character/live2d/delete")
-async def delete_live2d_model(request: DeleteModelRequest):
+async def delete_live2d_model(request: DeleteCharacterFileRequest):
     """Delete a Live2D model folder"""
     try:
         success, message = character_manager.delete_live2d_model(request.path)
@@ -1022,14 +1189,40 @@ class SettingsManager:
                 llm.set_keep_model_loaded(value)
             if key == "stream.yt.videoid":
                 chat_fetch.video_id = value
+
+        # Apply TTS provider FIRST, then voice — order matters so voice is set on the correct engine
+        for key, value in settings_items:
+            if key == "tts.provider":
+                try:
+                    tts.set_provider(value)
+                    logger.info(f"[Settings] TTS provider set to '{value}'")
+                except ValueError as e:
+                    logger.warning(f"Saved TTS provider '{value}' is invalid: {e}")
+
+        for key, value in settings_items:
             if key == "tts.voice":
                 try:
                     tts.change_voice(value)
-                except ValueError:
-                    # If saved voice is not available, remove it from settings
-                    logger.warning(f"Saved voice '{value}' not found, removing from settings")
-                    self.settings.pop("tts.voice")
-                    self.save_settings(self.settings)
+                    logger.info(f"[Settings] TTS voice set to '{value}'")
+                except Exception as e:
+                    logger.warning(f"[Settings] Voice '{value}' not valid for current provider: {e}")
+                    # Try default voice for active engine if available
+                    avail = tts.get_available_voices()
+                    if avail and len(avail) > 0:
+                        fallback = avail[0]
+                        try:
+                            tts.change_voice(fallback)
+                            self.settings["tts.voice"] = fallback
+                            self.save_settings(self.settings)
+                            logger.info(f"[Settings] Fallback voice set to '{fallback}'")
+                        except Exception:
+                            pass
+            if key == "tts.kokoro.speed":
+                try:
+                    engine = tts._get_instance("kokoro")
+                    engine.set_speed(float(value))
+                except Exception as e:
+                    logger.warning(f"Could not apply saved Kokoro speed: {e}")
         
         # Apply LLM sampling parameters
         llm_sampling_params = {}
@@ -1078,6 +1271,8 @@ except Exception as e:
 # Log startup time
 startup_time = time.time() - total_start_time
 startup_progress.complete_step(f"✅ Server Ready in {startup_time:.2f}s at {datetime.now().strftime('%H:%M:%S')}")
+startup_progress.is_ready = True
+startup_progress.current_message = "All Systems Ready"
 
 # *******************************
 # Settings API

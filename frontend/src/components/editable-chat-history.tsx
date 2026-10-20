@@ -7,6 +7,8 @@ import { TooltipContent, TooltipTrigger } from "./ui/tooltip"
 import { Tooltip } from "./ui/tooltip"
 import { TooltipProvider } from "./ui/tooltip"
 import { toast } from "sonner"
+import { apiFetch } from "@/lib/api-client"
+
 
 interface EditableChatHistoryProps {
     messages: HistoryItem[]
@@ -38,7 +40,7 @@ export default function EditableChatHistory({ messages, sessionId, onUpdate, onC
             const updatedHistory = [...messages]
             updatedHistory.splice(index, 1)
 
-            const response = await fetch(`/api/chat/session/update`, {
+            const response = await apiFetch(`/api/chat/session/update`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -69,7 +71,7 @@ export default function EditableChatHistory({ messages, sessionId, onUpdate, onC
                 content: editContent
             }
 
-            const response = await fetch(`/api/chat/session/update`, {
+            const response = await apiFetch(`/api/chat/session/update`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

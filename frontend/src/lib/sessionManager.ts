@@ -1,12 +1,14 @@
 import { HistoryItem } from "./types";
+import { apiFetch } from "./api-client";
 
-export async function createNewSession(): Promise<string | null> {
+export async function createNewSession(title: string = 'New Chat'): Promise<string | null> {
     try {
-        const response = await fetch('/api/chat/session/create', {
+        const response = await apiFetch('/api/chat/session/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: 'New Chat' }),
+            body: JSON.stringify({ title }),
         });
+
         
         if (!response.ok) {
             throw new Error('Failed to create session');
@@ -23,7 +25,7 @@ export async function createNewSession(): Promise<string | null> {
 export async function updateSession(sessionId: string | null, history: HistoryItem[]) {
     if (sessionId === null) return;
     
-    const response = await fetch(`/api/chat/session/update`, {
+    const response = await apiFetch(`/api/chat/session/update`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId, history })
@@ -36,7 +38,7 @@ export async function updateSession(sessionId: string | null, history: HistoryIt
 
 export async function updateSessionTitle(sessionId: string, title: string): Promise<boolean> {
     try {
-        const response = await fetch('/api/chat/session/update-title', {
+        const response = await apiFetch('/api/chat/session/update-title', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ session_id: sessionId, title }),
@@ -54,12 +56,16 @@ export async function updateSessionTitle(sessionId: string, title: string): Prom
 }
 
 export const fetchSessions = async () => {
+    if (window.__kyoma_sessions_cache && window.__kyoma_sessions_cache.length > 0) {
+        return window.__kyoma_sessions_cache;
+    }
     try {
-        const response = await fetch('/api/chat/sessions');
+        const response = await apiFetch('/api/chat/sessions');
         if (!response.ok) {
             throw new Error('Failed to fetch sessions');
         }
         const data = await response.json();
+        window.__kyoma_sessions_cache = data;
         return data;
     } catch (err) {
         console.error('Failed to fetch sessions:', err);
@@ -69,7 +75,7 @@ export const fetchSessions = async () => {
 
 export const fetchSessionContent = async (sessionId: string) => {
     try {
-      const response = await fetch(`/api/chat/session/${sessionId}`)
+      const response = await apiFetch(`/api/chat/session/${sessionId}`)
       if (!response.ok) {
         throw new Error('Failed to fetch session')
       }
@@ -83,7 +89,7 @@ export const fetchSessionContent = async (sessionId: string) => {
 
 export const deleteSession = async (sessionId: string) => {
     try {
-        const response = await fetch(`/api/chat/session/${sessionId}`, {
+        const response = await apiFetch(`/api/chat/session/${sessionId}`, {
             method: 'DELETE',
         });
         
@@ -102,7 +108,7 @@ export const indexSession = async (sessionId: string, options?: {
     format_style?: string;
 }): Promise<boolean> => {
     try {
-        const response = await fetch(`/api/chat/session/${sessionId}/index`, {
+        const response = await apiFetch(`/api/chat/session/${sessionId}/index`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -126,7 +132,7 @@ export const indexSession = async (sessionId: string, options?: {
 
 export const removeSessionIndex = async (sessionId: string): Promise<boolean> => {
     try {
-        const response = await fetch(`/api/chat/session/${sessionId}/index`, {
+        const response = await apiFetch(`/api/chat/session/${sessionId}/index`, {
             method: 'DELETE',
         });
         
@@ -143,7 +149,7 @@ export const removeSessionIndex = async (sessionId: string): Promise<boolean> =>
 
 export const getSessionIndexStatus = async (sessionId: string) => {
     try {
-        const response = await fetch(`/api/chat/session/${sessionId}/index/status`);
+        const response = await apiFetch(`/api/chat/session/${sessionId}/index/status`);
         
         if (!response.ok) {
             throw new Error('Failed to get session index status');
@@ -164,7 +170,7 @@ export const reindexAllSessions = async (): Promise<{
     total_sessions?: number;
 }> => {
     try {
-        const response = await fetch('/api/chat/reindex-all', {
+        const response = await apiFetch('/api/chat/reindex-all', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
         });

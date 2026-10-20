@@ -2,6 +2,8 @@ import { HistoryItem } from './types';
 import { pipelineManager } from './pipelineManager';
 import { cut5 } from './utils';
 import { createNewSession, updateSession, fetchSessionContent } from './sessionManager';
+import { apiFetch } from './api-client';
+import { globalStateManager } from './globalStateManager';
 
 type ChatUpdateCallback = (messages: HistoryItem[]) => void;
 
@@ -119,17 +121,24 @@ export class ChatManager {
         return pipelineManager.subscribe(handlePipelineUpdate);
     }
 
+    public stopGeneration() {
+        if (this.abortController) {
+            this.abortController.abort();
+            this.abortController = null;
+        }
+        globalStateManager.updateState('isLLMThinking', false);
+    }
+
     public handleInterrupt() {
         const currentTask = pipelineManager.getCurrentTask();
         if (currentTask?.status === "pending_interruption" && !currentTask.interruptionState?.llm) {
-            if (this.abortController) {
-                this.abortController.abort();
-            }
+            this.stopGeneration();
             pipelineManager.markInterruptionState("llm");
             return true;
         }
         return false;
     }
+
 
     public async sendMessage(
         input: string, 
@@ -145,13 +154,14 @@ export class ChatManager {
         
         this.messages.push(userMessage);
         this.notifySubscribers('onMessagesChange');
+        globalStateManager.updateState('isLLMThinking', true);
 
         try {
             // Fetch relevant context from memory (if enabled)
             let contextText = '';
             if (this.enableMemoryRetrieval) {
                 try {
-                    const contextRes = await fetch('/api/memory/context', {
+                    const contextRes = await apiFetch('/api/memory/context', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ text: input, limit: 3 })
@@ -203,7 +213,7 @@ export class ChatManager {
                 history: history,
                 systemPrompt: systemPromptWithContext,
             }));
-            const response = await fetch('/api/completion', {
+            const response = await apiFetch('/api/completion', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -229,8 +239,10 @@ export class ChatManager {
 
             await updateSession(this.sessionId, this.messages);
 
-            this.messages = [...this.messages, { role: 'user', content: input }];
+            // Push an empty assistant message as a placeholder for the stream
+            this.messages = [...this.messages, { role: 'assistant', content: '' }];
             this.notifySubscribers('onMessagesChange');
+
 
             const reader = response.body?.getReader();
             const decoder = new TextDecoder();
@@ -288,6 +300,8 @@ export class ChatManager {
             } else {
                 console.error('Fetch error:', error);
             }
+        } finally {
+            globalStateManager.updateState('isLLMThinking', false);
         }
     }
 
@@ -295,7 +309,7 @@ export class ChatManager {
         // take history from beginning of history to index
         const history = this.messages.slice(0, index + 1);
         // send history to backend
-        const response = await fetch('/api/completion/complete', {
+        const response = await apiFetch('/api/completion/complete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ history: history, systemPrompt: this.systemPrompt })
@@ -338,7 +352,7 @@ export class ChatManager {
         let contextText = '';
         if (this.enableMemoryRetrieval) {
             try {
-                const contextRes = await fetch('/api/memory/context', {
+                const contextRes = await apiFetch('/api/memory/context', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text: lastUserMessage.content, limit: 3 })
@@ -368,7 +382,7 @@ export class ChatManager {
         const systemPromptWithContext = visionSection + ocrSection + contextSection + instructionsSection;
 
         // Send completion request with history up to the user message
-        const response = await fetch('/api/completion', {
+        const response = await apiFetch('/api/completion', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

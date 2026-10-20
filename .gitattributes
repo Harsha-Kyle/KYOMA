@@ -1,0 +1,42 @@
+# Normalize line endings
+* text=auto
+
+# Force Unix line endings for code files
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.cfg text eol=lf
+*.txt text eol=lf
+*.gitignore text eol=lf
+
+# Windows-specific scripts keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files — no line ending conversion
+*.vrm binary
+*.glb binary
+*.wav binary
+*.mp3 binary
+*.gguf binary
+*.bin binary
+*.pt binary
+*.pth binary
+*.safetensors binary
+*.onnx binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.xlsx binary
+*.db binary

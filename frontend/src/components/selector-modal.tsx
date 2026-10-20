@@ -5,6 +5,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Download, Brain, Check, RefreshCw, AlertCircle, Trash2 } from "lucide-react"
 import { toast } from "sonner"
+import { apiFetch } from "@/lib/api-client"
+
 
 interface AIModel {
   displayName: string
@@ -31,20 +33,25 @@ interface DownloadProgress {
 export default function AIModelSelector() {
     
 const [open, setOpen] = useState(false)
-  const [internalSelected, setInternalSelected] = useState<AIModel | null>(null)
-  const [models, setModels] = useState<AIModel[]>([])
-  const [loading, setLoading] = useState(true)
+  const [internalSelected, setInternalSelected] = useState<AIModel | null>(
+    window.__kyoma_models_cache?.currentModel ?? null
+  )
+  const [models, setModels] = useState<AIModel[]>(
+    window.__kyoma_models_cache?.models ?? []
+  )
+  const [loading, setLoading] = useState(!window.__kyoma_models_cache)
   const [downloading, setDownloading] = useState<Record<string, string>>({}) // modelName -> downloadId
   const [downloadProgress, setDownloadProgress] = useState<Record<string, DownloadProgress>>({})
 
   const loadModels = async () => {
     try {
-      const res = await fetch("/api/llm/models")
+      const res = await apiFetch("/api/llm/models")
       const data = await res.json()
       setModels(data.models || [])
       if (data.currentModel) {
         setInternalSelected(data.currentModel)
       }
+      window.__kyoma_models_cache = data
       setLoading(false)
     } catch (error) {
       console.error("Failed to load models:", error)
@@ -61,7 +68,7 @@ const [open, setOpen] = useState(false)
     const pollProgress = async () => {
       for (const [modelName, downloadId] of Object.entries(downloading)) {
         try {
-          const res = await fetch(`/api/llm/models/download/${downloadId}/progress`)
+          const res = await apiFetch(`/api/llm/models/download/${downloadId}/progress`)
           if (res.ok) {
             const progress = await res.json()
             setDownloadProgress(prev => ({
@@ -96,7 +103,7 @@ const [open, setOpen] = useState(false)
 
   const handleModelSelect = (model: AIModel) => {
     setInternalSelected(model)
-    fetch("/api/settings/update", {
+    apiFetch("/api/settings/update", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ settings: { "llm.model_filename": model.fileName } }),
@@ -106,7 +113,7 @@ const [open, setOpen] = useState(false)
 
   const handleDownload = async (model: AIModel) => {
     try {
-      const res = await fetch("/api/llm/models/download", {
+      const res = await apiFetch("/api/llm/models/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -146,7 +153,7 @@ const [open, setOpen] = useState(false)
     }
     
     try {
-      const res = await fetch("/api/llm/models/delete", {
+      const res = await apiFetch("/api/llm/models/delete", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

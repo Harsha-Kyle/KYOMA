@@ -26,6 +26,8 @@ import { Badge } from "@/components/ui/badge"
 import { Upload, FileText, Folder, Trash2, Download, AlertCircle, CheckCircle2, MoreVertical } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { CharacterModel } from "@/lib/characterModels"
+import { apiFetch } from "@/lib/api-client"
+
 
 // Custom props for directory input
 interface DirectoryInputProps extends React.InputHTMLAttributes<HTMLInputElement> {
@@ -98,7 +100,7 @@ export default function ModelUploadManager({ live2DModels, vrmModels, onModelsCh
         ? "/api/character/vrm/upload"
         : "/api/character/live2d/upload"
 
-      const response = await fetch(endpoint, {
+      const response = await apiFetch(endpoint, {
         method: "POST",
         body: formData,
       })
@@ -128,7 +130,7 @@ export default function ModelUploadManager({ live2DModels, vrmModels, onModelsCh
         formData.append("files", file, file.webkitRelativePath)
       })
 
-      const response = await fetch("/api/character/live2d/upload-folder", {
+      const response = await apiFetch("/api/character/live2d/upload-folder", {
         method: "POST",
         body: formData,
       })
@@ -153,7 +155,7 @@ export default function ModelUploadManager({ live2DModels, vrmModels, onModelsCh
         ? `/api/character/vrm/delete`
         : `/api/character/live2d/delete`
 
-      const response = await fetch(endpoint, {
+      const response = await apiFetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: model.path }),

@@ -31,6 +31,8 @@ import { Badge } from "@/components/ui/badge"
 import { Upload, FileText, Trash2, Download, AlertCircle, CheckCircle2, MoreVertical } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { TTSVoice } from "@/lib/tts/gptsovitsProvider"
+import { apiFetch } from "@/lib/api-client"
+
 
 const LANGUAGES = {
   'zh': 'Chinese',
@@ -69,7 +71,7 @@ export default function GptSovitsUploadManager({ voices, onVoicesChange }: Voice
       formDataToSend.append("reference_text", formData.referenceText)
       formDataToSend.append("reference_language", formData.referenceLanguage)
 
-      const response = await fetch("/api/tts/upload", {
+      const response = await apiFetch("/api/tts/upload", {
         method: "POST",
         body: formDataToSend,
       })
@@ -101,7 +103,7 @@ export default function GptSovitsUploadManager({ voices, onVoicesChange }: Voice
 
   const handleDeleteVoice = async (voice: TTSVoice) => {
     try {
-      const response = await fetch("/api/tts/delete", {
+      const response = await apiFetch("/api/tts/delete", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: voice.name }),

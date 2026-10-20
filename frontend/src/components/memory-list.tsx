@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { apiFetch } from '@/lib/api-client';
 
 
 const MemoryList: React.FC = () => {
@@ -17,7 +18,7 @@ const MemoryList: React.FC = () => {
     useEffect(() => {
         const fetchMemories = async () => {
             setLoading(true);
-            const mem_response = await fetch('/api/memory', {
+            const mem_response = await apiFetch('/api/memory', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

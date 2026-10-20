@@ -16,14 +16,38 @@ class Memory:
     def __init__(self, temp = False):
         self.current_module_directory = os.path.dirname(__file__)
         self.data_path = os.path.join(self.current_module_directory, "data")
-        if temp:
-            self.client = QdrantClient(":memory:")
-        else:
-            self.client = QdrantClient(path=self.data_path)
-        
-        self.client.set_model("sentence-transformers/all-MiniLM-L6-v2")
+        self.is_available = False
+        try:
+            if temp:
+                self.client = QdrantClient(":memory:")
+            else:
+                self.client = QdrantClient(path=self.data_path)
+            
+            try:
+                self.client.set_model("sentence-transformers/all-MiniLM-L6-v2")
+                self.is_available = True
+            except Exception as e:
+                logger.error(f"[Memory] Initial fastembed model load failed: {e}. Attempting cache cleanup and retry...")
+                # If cache was corrupted, try removing corrupted fastembed cache and retry once
+                cache_dir = os.path.join(os.environ.get("TEMP", ""), "fastembed_cache")
+                if os.path.exists(cache_dir):
+                    import shutil
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                try:
+                    self.client.set_model("sentence-transformers/all-MiniLM-L6-v2")
+                    self.is_available = True
+                    logger.info("[Memory] Successfully loaded embedding model after cache reset.")
+                except Exception as e2:
+                    logger.warning(f"[Memory] Fastembed model load failed ({e2}). Memory will run in degraded mode.")
+                    self.is_available = False
+        except Exception as e:
+            logger.error(f"[Memory] Failed to initialize Qdrant client: {e}")
+            self.client = None
+            self.is_available = False
     
     def check_collection_exists(self):
+        if not self.is_available or not self.client:
+            return False
         try:
             if not self.client.collection_exists(self.MESSAGE_COLLECTION_NAME):
                 logger.debug(f"Collection {self.MESSAGE_COLLECTION_NAME} does not exist yet. It will be created on first insertion.")

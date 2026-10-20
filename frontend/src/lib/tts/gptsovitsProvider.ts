@@ -1,4 +1,5 @@
 import { BaseTTSProvider } from "./baseTTSProvider";
+import { apiFetch } from "../api-client";
 
 export interface TTSVoice {
     name: string;
@@ -36,7 +37,7 @@ export class GPTSoVITSProvider extends BaseTTSProvider {
     }
 
     private async fetchVoices() {
-        const response = await fetch('/api/tts/voices');
+        const response = await apiFetch('/api/tts/voices');
         const data = await response.json();
         this.voices = data.voices.map((voice: string) => ({ name: voice }));
         this.notifySubscribers();
@@ -51,7 +52,7 @@ export class GPTSoVITSProvider extends BaseTTSProvider {
     }
 
     async setVoice(voice: string): Promise<void> {
-        const response = await fetch('/api/tts/change-voice', {
+        const response = await apiFetch('/api/tts/change-voice', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -69,7 +70,7 @@ export class GPTSoVITSProvider extends BaseTTSProvider {
     }
 
     async generateAudio(text: string): Promise<Response> {
-        const response = await fetch("/api/tts", {
+        const response = await apiFetch("/api/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text })

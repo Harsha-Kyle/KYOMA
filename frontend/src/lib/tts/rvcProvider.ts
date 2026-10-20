@@ -1,4 +1,5 @@
 import { BaseTTSProvider } from "./baseTTSProvider";
+import { apiFetch } from "../api-client";
 
 interface RVCModel {
     name: string;
@@ -43,14 +44,14 @@ export class RVCProvider extends BaseTTSProvider {
     }
 
     private async fetchVoices() {
-        const response = await fetch('/api/rvc/models');
+        const response = await apiFetch('/api/rvc/models');
         const data = await response.json();
         this.voices = data.models.map((model: RVCModel) => model.name);
         this.notifySubscribers();
     }
 
     private async fetchEdgeVoices() {
-        const response = await fetch('/api/rvc/edge-models');
+        const response = await apiFetch('/api/rvc/edge-models');
         const data = await response.json();
         this.edgeVoices = data.models;
         this.notifySubscribers();
@@ -83,7 +84,7 @@ export class RVCProvider extends BaseTTSProvider {
     }
 
     async setVoice(voice: string): Promise<void> {
-        const response = await fetch(`/api/rvc/load_model/${voice}`, {
+        const response = await apiFetch(`/api/rvc/load_model/${voice}`, {
             method: 'POST'
         });
 
@@ -106,7 +107,7 @@ export class RVCProvider extends BaseTTSProvider {
             throw new Error("RVC model and Edge TTS voice must be selected");
         }
 
-        const response = await fetch("/api/rvc/convert", {
+        const response = await apiFetch("/api/rvc/convert", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -126,7 +127,7 @@ export class RVCProvider extends BaseTTSProvider {
     }
 
     async downloadModel(url: string): Promise<DownloadModelResponse> {
-        const response = await fetch("/api/rvc/download_model", {
+        const response = await apiFetch("/api/rvc/download_model", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ url })

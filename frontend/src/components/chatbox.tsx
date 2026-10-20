@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Send, Square, Plus, MoreHorizontal, Edit, Trash2 } from 'lucide-react';
+import { Send, Square, Plus, MoreHorizontal, Edit, Trash2, Mic, MicOff } from 'lucide-react';
 import { useSettings } from '@/context/SettingsContext';
 import EditableChatHistory from './editable-chat-history';
 import { HistoryItem } from '@/lib/types';
@@ -10,6 +10,11 @@ import { fetchSessions, createNewSession, deleteSession, updateSessionTitle } fr
 import { Session } from '@/lib/types';
 import { SidePanel } from './side-panel';
 import { SidebarMenuButton } from './ui/sidebar';
+import { apiFetch } from '@/lib/api-client';
+import { globalStateManager } from '@/lib/globalStateManager';
+import { pipelineManager } from '@/lib/pipelineManager';
+import { ttsManager } from '@/lib/ttsManager';
+
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -28,23 +33,82 @@ const Chatbox = () => {
     const [selectedSession, setSelectedSession] = useState<string | null>(null);
     const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
     const [editingTitle, setEditingTitle] = useState<string>('');
+    const [isTTSPlaying, setIsTTSPlaying] = useState<boolean>(false);
+    const [isVoiceRecording, setIsVoiceRecording] = useState<boolean>(false);
+
+    useEffect(() => {
+        const unsubTTS = globalStateManager.subscribe('isTTSPlaying', (playing) => {
+            setIsTTSPlaying(playing);
+        });
+        const unsubVoice = globalStateManager.subscribe('isVoiceRecording', (rec) => {
+            setIsVoiceRecording(rec);
+        });
+        setIsTTSPlaying(globalStateManager.getState('isTTSPlaying'));
+        setIsVoiceRecording(globalStateManager.getState('isVoiceRecording'));
+        return () => {
+            unsubTTS();
+            unsubVoice();
+        };
+    }, []);
+
+    const handleStopAndReset = () => {
+        ttsManager.stopAllAudio();
+        chatManager.stopGeneration();
+        pipelineManager.cancelAllTasks();
+        pipelineManager.interruptCurrentTask();
+        apiFetch('/api/record/unmute', { method: 'POST' }).catch(() => {});
+        globalStateManager.updateState('isTTSPlaying', false);
+        globalStateManager.updateState('isLLMThinking', false);
+    };
+
+    useEffect(() => {
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key !== '.') return;
+            const tag = (document.activeElement as HTMLElement)?.tagName?.toLowerCase();
+            if (tag === 'input' || tag === 'textarea') return;
+            if (isTTSPlaying || globalStateManager.getState('isLLMThinking')) {
+                handleStopAndReset();
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [isTTSPlaying]);
+
+
+    const initSessionOnLoad = async () => {
+        const data = await fetchSessions();
+        setSessionList(data);
+        
+        // Auto-create 'Chat #N' on fresh app launch
+        const chatNum = (data?.length || 0) + 1;
+        const autoTitle = `Chat #${chatNum}`;
+        const newSessionId = await createNewSession(autoTitle);
+        if (newSessionId) {
+            const updated = await fetchSessions();
+            setSessionList(updated);
+            setSelectedSession(newSessionId);
+            window.__kyoma_sessions_cache = updated;
+        } else if (data.length > 0) {
+            setSelectedSession(data[0].id);
+        }
+    };
 
     const getSessions = async () => {
         const data = await fetchSessions();
         setSessionList(data);
-        if(data.length > 0 && !selectedSession) {
+        if (data.length > 0 && !selectedSession) {
             setSelectedSession(data[0].id);
-        }
-        else if(data.length === 0 && selectedSession) {
+        } else if (data.length === 0 && selectedSession) {
             setSelectedSession(null);
         }
     };
 
     const handleCreateNewSession = async () => {
-        const newSessionId = await createNewSession();
+        const chatNum = (sessionList?.length || 0) + 1;
+        const newSessionId = await createNewSession(`Chat #${chatNum}`);
         if (newSessionId) {
-            await getSessions(); // Refresh the session list
-            setSelectedSession(newSessionId); // Select the new session
+            await getSessions();
+            setSelectedSession(newSessionId);
         }
     };
 
@@ -52,7 +116,6 @@ const Chatbox = () => {
         await deleteSession(sessionId);
         await getSessions(); // Refresh the session list
         if (selectedSession === sessionId) {
-            // If we deleted the currently selected session, select the first available one
             const remainingSessions = sessionList.filter(s => s.id !== sessionId);
             if (remainingSessions.length > 0) {
                 setSelectedSession(remainingSessions[0].id);
@@ -65,7 +128,7 @@ const Chatbox = () => {
     const handleRenameSession = async (sessionId: string, newTitle: string) => {
         const success = await updateSessionTitle(sessionId, newTitle);
         if (success) {
-            await getSessions(); // Refresh the session list
+            await getSessions();
             setEditingSessionId(null);
             setEditingTitle('');
         }
@@ -91,7 +154,7 @@ const Chatbox = () => {
     const isCurrentSessionEmpty = displayedMessages.length === 0;
 
     useEffect(() => {
-        getSessions();
+        initSessionOnLoad();
     }, []);
 
     useEffect(() => {
@@ -108,14 +171,6 @@ const Chatbox = () => {
         chatManager.setEnableMemoryRetrieval(settings["llm.enableMemoryRetrieval"] ?? true);
     }, [settings["llm.enableMemoryRetrieval"]]);
 
-    useEffect(() => {
-        const fetchSessionList = async () => {
-            const response = await fetch('/api/chat/sessions');
-            const data = await response.json();
-            setSessionList(data);
-        };
-        fetchSessionList();
-    }, []);
 
     useEffect(() => {
         const unsubscribe = chatManager.subscribe((messages) => {
@@ -133,6 +188,17 @@ const Chatbox = () => {
 
     const handleSend = async (input: string) => {
         if (input.trim() === '') return;
+        
+        // Auto-rename session to topic preview if it's currently a default or numbered chat
+        if (selectedSession) {
+            const currentSession = sessionList.find(s => s.id === selectedSession);
+            if (currentSession && (/^Chat #\d+$/.test(currentSession.title) || currentSession.title === 'New Chat')) {
+                const topic = input.trim().replace(/[\r\n]+/g, ' ');
+                const preview = topic.length > 28 ? topic.slice(0, 28).trim() + '...' : topic;
+                handleRenameSession(selectedSession, preview);
+            }
+        }
+
         setIsProcessing(true);
         setInput('');
         await chatManager.sendMessage(input);
@@ -242,11 +308,33 @@ const Chatbox = () => {
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={(e) => e.key === "Enter" && handleSend(input)}
                     />
+                    <Button
+                        type="button"
+                        variant={isVoiceRecording ? "destructive" : "outline"}
+                        size="icon"
+                        title={isVoiceRecording ? "Mute / Stop Voice Recording" : "Start Voice Recording"}
+                        onClick={() => {
+                            globalStateManager.updateState('isVoiceRecording', !isVoiceRecording);
+                        }}
+                    >
+                        {isVoiceRecording ? <Mic className="h-5 w-5 text-red-500 animate-pulse" /> : <MicOff className="h-5 w-5" />}
+                    </Button>
+                    {isTTSPlaying && (
+                        <Button
+                            variant="destructive"
+                            size="icon"
+                            title="Stop Speaking / Interrupt (or press .)"
+                            onClick={handleStopAndReset}
+                        >
+                            <Square />
+                        </Button>
+                    )}
                     <Button onClick={() => handleSend(input)}>
                         {!isProcessing ? <Send></Send> : <Square></Square>}
                     </Button>
                 </div>
             </div>
+
         </div>
     );
 };

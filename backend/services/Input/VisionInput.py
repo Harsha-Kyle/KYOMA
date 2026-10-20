@@ -25,26 +25,38 @@ class VisionInput:
         """
         self.device = device
         self.logger = logger
-        
-        # Initialize OCR reader
-        try:
-            self.ocr_reader = easyocr.Reader(languages)
-            self.logger.info(f"OCR reader initialized with languages: {languages}")
-        except Exception as e:
-            self.logger.error(f"Failed to initialize OCR reader: {e}")
-            self.ocr_reader = None
-        
-        # Initialize image captioning model
-        try:
-            self.processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-            self.model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
-            if device == 'cuda' and torch.cuda.is_available():
-                self.model = self.model.to('cuda')
-            self.logger.info("Image captioning model initialized")
-        except Exception as e:
-            self.logger.error(f"Failed to initialize image captioning model: {e}")
-            self.processor = None
-            self.model = None
+        self._ocr_languages = languages
+
+        # Models are loaded lazily (on first use) to save startup memory
+        self.ocr_reader = None
+        self.processor = None
+        self.model = None
+        self.logger.info("VisionInput initialized (OCR and captioning models will load on first use)")
+
+    def _ensure_ocr(self):
+        """Load OCR reader on first use."""
+        if self.ocr_reader is None:
+            try:
+                self.logger.info("Loading OCR model (first use)...")
+                self.ocr_reader = easyocr.Reader(self._ocr_languages)
+                self.logger.info(f"OCR reader loaded with languages: {self._ocr_languages}")
+            except Exception as e:
+                self.logger.error(f"Failed to load OCR reader: {e}")
+
+    def _ensure_captioning(self):
+        """Load BLIP captioning model on first use."""
+        if self.processor is None or self.model is None:
+            try:
+                self.logger.info("Loading BLIP captioning model (first use)...")
+                self.processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+                self.model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+                if self.device == 'cuda' and torch.cuda.is_available():
+                    self.model = self.model.to('cuda')
+                self.logger.info("BLIP captioning model loaded")
+            except Exception as e:
+                self.logger.error(f"Failed to load captioning model: {e}")
+                self.processor = None
+                self.model = None
 
     def get_monitors(self) -> List[Dict]:
         """
@@ -121,6 +133,8 @@ class VisionInput:
             List of dictionaries containing text, bounding box, and confidence
         """
         if self.ocr_reader is None:
+            self._ensure_ocr()
+        if self.ocr_reader is None:
             self.logger.error("OCR reader not initialized")
             return []
         
@@ -181,6 +195,8 @@ class VisionInput:
         Returns:
             Generated caption string or None if failed
         """
+        if self.processor is None or self.model is None:
+            self._ensure_captioning()
         if self.processor is None or self.model is None:
             self.logger.error("Image captioning model not initialized")
             return ""

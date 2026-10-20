@@ -78,7 +78,19 @@ SYSTEM_APPS = {
 # --------------------
 # CONFIG
 # --------------------
-OLLAMA_MODEL = "gemma4:e2b"
+import os as _os, json as _json
+_kyoma_cfg = _os.path.join(_os.path.dirname(__file__), 'kyoma_config.json')
+
+def _load_kyoma_model():
+    try:
+        if _os.path.exists(_kyoma_cfg):
+            with open(_kyoma_cfg) as f:
+                return _json.load(f).get('ollama_model', 'gemma4:e2b')
+    except Exception:
+        pass
+    return 'gemma4:e2b'
+
+OLLAMA_MODEL = _load_kyoma_model()
 SYSTEM = platform.system().lower()
 
 def _to_int_level(val, default=50):
@@ -529,7 +541,7 @@ AVAILABLE_TOOLS = [
     add_birthday_reminder, list_birthday_reminders, delete_birthday_reminder
 ]
 
-memory = MemoryManager(max_history=4)
+memory = MemoryManager(max_history=3)
 
 def query_ollama_with_tools(user_text):
     memory.add_user_message(user_text)
@@ -538,23 +550,41 @@ def query_ollama_with_tools(user_text):
             "You are Kyoma, a PC automation assistant. "
             "Always call a tool for PC tasks — never say you can't. "
             "Reply short and direct."
+            "Use only 3-10 words to respond"
     )
     
     try:
-        # First round: user query
-        resp = chat(
-            model=OLLAMA_MODEL, 
-            messages=memory.get_messages(system_prompt=system_prompt),
-            tools=AVAILABLE_TOOLS
-        )
-        
+        # First round: user query with tools if supported
+        try:
+            resp = chat(
+                model=OLLAMA_MODEL, 
+                messages=memory.get_messages(system_prompt=system_prompt),
+                tools=AVAILABLE_TOOLS,
+                keep_alive="1h",
+                options={}
+            )
+        except Exception as tool_err:
+            err_str = str(tool_err).lower()
+            if "does not support tools" in err_str or "400" in err_str:
+                print(f"⚠️ Model '{OLLAMA_MODEL}' does not support tools. Falling back to direct text completion.")
+                resp = chat(
+                    model=OLLAMA_MODEL,
+                    messages=memory.get_messages(system_prompt=system_prompt),
+                    keep_alive="1h",
+                    options={}
+                )
+            else:
+                raise tool_err
+
         msg = resp["message"]
+
         
         # Check if the model wants to call tools
         if msg.get("tool_calls"):
             memory.add_assistant_message(tool_calls=msg["tool_calls"])
             
             # Execute all tools the model requested
+            executed_descriptions = []
             for tool_call in msg["tool_calls"]:
                 func_name = tool_call["function"]["name"]
                 args = tool_call["function"]["arguments"]
@@ -568,21 +598,68 @@ def query_ollama_with_tools(user_text):
                         try:
                             res = fn(**args)
                             result = str(res) if res is not None else "Success"
+                            
+                            # Build friendly description for fallback voice confirmation
+                            if func_name == "open_application":
+                                executed_descriptions.append(f"opened {args.get('name', 'the application')}")
+                            elif func_name == "close_application":
+                                executed_descriptions.append(f"closed {args.get('name', 'the application')}")
+                            elif func_name == "set_volume":
+                                executed_descriptions.append(f"set the volume to {args.get('level', 50)} percent")
+                            elif func_name == "change_volume":
+                                executed_descriptions.append("adjusted the volume")
+                            elif func_name == "mute_volume":
+                                executed_descriptions.append("muted the volume")
+                            elif func_name == "unmute_volume":
+                                executed_descriptions.append("unmuted the volume")
+                            elif func_name == "set_brightness":
+                                executed_descriptions.append(f"set the brightness to {args.get('level', 50)} percent")
+                            elif func_name == "play_pause":
+                                executed_descriptions.append("toggled media playback")
+                            elif func_name == "next_track":
+                                executed_descriptions.append("skipped the track")
+                            elif func_name == "previous_track":
+                                executed_descriptions.append("played the previous track")
+                            elif func_name == "take_screenshot_save":
+                                executed_descriptions.append("taken a screenshot")
+                            elif func_name == "add_reminder":
+                                executed_descriptions.append(f"added a reminder for {args.get('title', 'your task')}")
+                            else:
+                                executed_descriptions.append(f"performed {func_name.replace('_', ' ')}")
                         except Exception as e:
                             result = f"Error executing {func_name}: {e}"
+                            executed_descriptions.append(f"encountered an error trying to run {func_name.replace('_', ' ')}")
                         break
                 
                 memory.add_tool_message(text=result, name=func_name)
             
             # Second round: send tool results back to get final text response
-            resp2 = chat(
-                model=OLLAMA_MODEL,
-                messages=memory.get_messages(system_prompt=system_prompt)
-            )
+            try:
+                resp2 = chat(
+                    model=OLLAMA_MODEL,
+                    messages=memory.get_messages(system_prompt=system_prompt),
+                    keep_alive="1h",
+                    options={
+                        "num_ctx": 1024,
+                        "num_predict": 80,
+                        "temperature": 0.3,
+                    }
+                )
+
+                final_text = resp2["message"].get("content", "")
+            except Exception as chat_err:
+                print(f"⚠️ Second-round chat failed: {chat_err}")
+                final_text = ""
+                
+            if not final_text or not final_text.strip():
+                if executed_descriptions:
+                    final_text = "I have " + ", and ".join(executed_descriptions) + "."
+                else:
+                    final_text = "I have performed the requested task."
             
-            final_text = resp2["message"]["content"]
             memory.add_assistant_message(text=final_text)
             return {"ok": True, "text": final_text}
+
             
         else:
             # Model just responded with text
@@ -630,6 +707,16 @@ def repl_loop():
             break
         except Exception as e:
             print("Error:", e)
+
+def set_ollama_model(model_name: str):
+    """Persist the Kyoma model and update OLLAMA_MODEL at runtime."""
+    global OLLAMA_MODEL
+    OLLAMA_MODEL = model_name
+    try:
+        with open(_kyoma_cfg, 'w') as f:
+            _json.dump({'ollama_model': model_name}, f)
+    except Exception as e:
+        print(f'[Kyoma] Could not save config: {e}')
 
 if __name__ == "__main__":
     ensure_ollama_running(OLLAMA_MODEL)

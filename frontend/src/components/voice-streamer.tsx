@@ -13,12 +13,15 @@ import { ScrollArea } from "@radix-ui/react-scroll-area";
 
 import { pipelineManager } from "@/lib/pipelineManager";
 import { globalStateManager } from "@/lib/globalStateManager";
+import { apiFetch, getApiKey } from "@/lib/api-client";
 
 export default function VoiceStreamer() {
   const [isRecording, setIsRecording] = useState(false);
   const [probability, setProbability] = useState<number | null>(null);
   const [transcriptions, setTranscriptions] = useState<string[]>([]);
   const socketRef = useRef<WebSocket | null>(null);
+  const isTTSPlayingRef = useRef<boolean>(false);
+  const isLLMThinkingRef = useRef<boolean>(false);
 
   useEffect(() => {
     // Subscribe to global recording state
@@ -26,9 +29,9 @@ export default function VoiceStreamer() {
       setIsRecording(recording);
       // Make appropriate API calls based on recording state
       if (recording) {
-        await fetch("/api/record/start", { method: "POST" });
+        await apiFetch("/api/record/start", { method: "POST" });
       } else {
-        await fetch("/api/record/stop", { method: "POST" });
+        await apiFetch("/api/record/stop", { method: "POST" });
       }
     });
 
@@ -38,37 +41,89 @@ export default function VoiceStreamer() {
     return () => unsubscribe();
   }, []);
 
+  // Keep isTTSPlayingRef and isLLMThinkingRef in sync with globalStateManager
   useEffect(() => {
-    stopRecording()
-    const socket = new WebSocket(
-      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host
-      }/ws/audio`
-    );
+    const unsubTTS = globalStateManager.subscribe('isTTSPlaying', async (playing) => {
+      isTTSPlayingRef.current = playing;
+      if (globalStateManager.getState('isVoiceRecording')) {
+        if (playing) {
+          await apiFetch('/api/record/mute', { method: 'POST' });
+        } else if (!globalStateManager.getState('isLLMThinking')) {
+          await apiFetch('/api/record/unmute', { method: 'POST' });
+        }
+      }
+    });
+
+    const unsubLLM = globalStateManager.subscribe('isLLMThinking', async (thinking) => {
+      isLLMThinkingRef.current = thinking;
+      if (globalStateManager.getState('isVoiceRecording')) {
+        if (thinking) {
+          await apiFetch('/api/record/mute', { method: 'POST' });
+        } else if (!globalStateManager.getState('isTTSPlaying')) {
+          await apiFetch('/api/record/unmute', { method: 'POST' });
+        }
+      }
+    });
+
+    isTTSPlayingRef.current = globalStateManager.getState('isTTSPlaying');
+    isLLMThinkingRef.current = globalStateManager.getState('isLLMThinking');
+
+    return () => {
+      unsubTTS();
+      unsubLLM();
+    };
+  }, []);
+
+  useEffect(() => {
+    const key = getApiKey();
+    const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const wsUrl = `${wsProtocol}://${window.location.host}/ws/audio${key ? `?api_key=${encodeURIComponent(key)}` : ""}`;
+    const socket = new WebSocket(wsUrl);
+
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === "probability") {
-        if (data.probability >= 0.3 && pipelineManager.getCurrentTask()?.status != "pending_interruption"){
+        // DISABLED: prevent self-interruption during TTS playback
+        /*
+        if (data.probability >= 0.45 && !isTTSPlayingRef.current && pipelineManager.getCurrentTask()?.status != "pending_interruption"){
           pipelineManager.interruptCurrentTask()
         }
+        */
         setProbability(data.probability);
       } else if (data.type === "transcription") {
-        pipelineManager.addInputTask(data.text);
-        setTranscriptions((prev) => [...prev, data.text]);
+        // Gate transcription: discard if TTS is playing OR LLM is actively thinking
+        if (isTTSPlayingRef.current || isLLMThinkingRef.current) {
+          console.log("[VoiceStreamer] Ignored transcript during speech/thinking:", data.text);
+          return;
+        }
+        const text = (data.text || "").trim();
+        // Discard dot-only noise e.g. ". . . . ." or empty/whitespace/punctuation-only strings
+        const alphanumericOnly = text.replace(/[^\w\s]/gi, '').trim();
+        if (!alphanumericOnly) {
+          console.log("[VoiceStreamer] Silently discarded noise/dot transcript:", text);
+          return;
+        }
+        pipelineManager.addInputTask(text);
+        setTranscriptions((prev) => [...prev, text]);
       }
+
     };
+
     socketRef.current = socket;
-    return () => socket.close();
+    return () => {
+      socket.close();
+    };
   }, []);
 
   const startRecording = async () => {
-    await fetch("/api/record/start", { method: "POST" });
     globalStateManager.updateState('isVoiceRecording', true);
   };
 
   const stopRecording = async () => {
-    await fetch("/api/record/stop", { method: "POST" });
     globalStateManager.updateState('isVoiceRecording', false);
   };
+
+
 
   return (
     <Panel className="max-w-4xl mx-auto">

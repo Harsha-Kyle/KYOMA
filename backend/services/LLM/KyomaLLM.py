@@ -62,6 +62,20 @@ class KyomaLLM(BaseLLM):
             yield f"Error: Kyoma automation module could not be loaded: {self._load_error}"
             return
 
+        # ── Fast path: direct command execution without LLM ─────────────────
+        # Matches simple, unambiguous commands (volume, brightness, media, apps,
+        # system info, etc.) and executes them instantly — saving ~1.5-5s per call.
+        try:
+            from fast_router import route as _fast_route
+            fast_text, fast_handled = _fast_route(text)
+            if fast_handled and fast_text:
+                logger.info(f"[FastRouter] ⚡ Direct: {text!r} → {fast_text!r}")
+                yield fast_text
+                return
+        except Exception as _fr_err:
+            logger.warning(f"[FastRouter] Error (falling through to LLM): {_fr_err}")
+
+        # ── Slow path: full Ollama LLM + tool-call pipeline ─────────────────
         try:
             logger.info(f"Sending query to Kyoma automation: {text}")
             result = self.kyoma_module.query_ollama_with_tools(text)
@@ -72,6 +86,7 @@ class KyomaLLM(BaseLLM):
         except Exception as e:
             logger.error(f"Error in KyomaLLM execution: {e}")
             yield f"Error executing Kyoma automation: {e}"
+
 
     def complete_current_response(self, history: List[Dict[str, str]], system_prompt: str = "", **kwargs) -> Generator[str, None, None]:
         last_msg = ""

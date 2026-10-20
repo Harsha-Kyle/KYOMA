@@ -3,11 +3,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Settings } from "lucide-react"
 import RvcSettings from "@/components/rvc-settings"
 import GptSovitsSettings from "@/components/gptsovits-settings"
+import KokoroSettings from "@/components/kokoro-settings"
 import { TextInputPreview } from "@/components/text-input-preview"
 import { ttsManager } from "@/lib/ttsManager"
 import SettingDropdown from "@/components/setting-dropdown"
 
-type TTSProvider = "gpt-sovits" | "rvc"
+type TTSProvider = "gpt-sovits" | "rvc" | "kokoro"
 
 export default function TTSPage() {
   const [selectedProvider, setSelectedProvider] = useState<TTSProvider>(ttsManager.getSelectedProvider())
@@ -37,13 +38,23 @@ export default function TTSPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <SettingDropdown id="tts.provider" defaultValue="gpt-sovits" options={{ "gpt-sovits": "GPT-SoVITS", "rvc": "RVC (Retrieval-based-Voice-Conversion)" }} onValueChange={handleProviderChange} />
+            <SettingDropdown
+              id="tts.provider"
+              defaultValue="gpt-sovits"
+              options={{
+                "gpt-sovits": "GPT-SoVITS",
+                "rvc":        "RVC (Retrieval-based Voice Conversion)",
+                "kokoro":     "🟢 Kokoro (Offline, Fast)",
+              }}
+              onValueChange={handleProviderChange}
+            />
           </CardContent>
         </Card>
 
         {/* Provider-specific Settings */}
         {selectedProvider === "gpt-sovits" && <GptSovitsSettings />}
-        {selectedProvider === "rvc" && <RvcSettings />}
+        {selectedProvider === "rvc"        && <RvcSettings />}
+        {selectedProvider === "kokoro"     && <KokoroSettings />}
       </div>
     </div>
   )

@@ -8,6 +8,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import EditableChatHistory from "./editable-chat-history"
 import { Session } from "@/lib/types"
 import { fetchSessionContent } from "@/lib/sessionManager"
+import { apiFetch } from "@/lib/api-client"
+
 
 interface ImportedMessage {
   role: string
@@ -71,7 +73,7 @@ export default function SessionDetail({ sessionId, onBack }: SessionDetailProps)
       setIndexedLoading(true)
       setIndexedError(null)
       setIndexedChunks(null)
-      fetch(`/api/chat/session/${sessionId}/indexed`)
+      apiFetch(`/api/chat/session/${sessionId}/indexed`)
         .then(async (res) => {
           if (!res.ok) throw new Error("Failed to fetch indexed data")
           const data = await res.json()
@@ -107,7 +109,7 @@ export default function SessionDetail({ sessionId, onBack }: SessionDetailProps)
             setJsonError(null)
             return
           }
-          const response = await fetch("/api/chat/session/update", {
+          const response = await apiFetch("/api/chat/session/update", {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',

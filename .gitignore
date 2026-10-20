@@ -65,6 +65,10 @@ esp32_firmware/.vscode/
 # ──────────────────────────────────────────────────────────
 # settings.json contains user-specific paths — keep a template instead
 backend/settings.json
+data/api_key.txt
+backend/data/api_key.txt
+.env
+.env.*
 
 # ──────────────────────────────────────────────────────────
 # 🎵 AUDIO / MEDIA  (runtime generated or large)

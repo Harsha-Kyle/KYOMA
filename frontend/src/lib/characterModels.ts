@@ -1,3 +1,5 @@
+import { apiFetch } from "./api-client";
+
 export interface CharacterModel {
     path: string;
     displayName: string;
@@ -12,7 +14,7 @@ export interface ModelResponse {
  */
 export async function fetchLive2DModels(): Promise<CharacterModel[]> {
     try {
-        const response = await fetch('/api/character/live2d/models');
+        const response = await apiFetch('/api/character/live2d/models');
         if (!response.ok) {
             throw new Error(`Failed to fetch Live2D models: ${response.statusText}`);
         }
@@ -29,7 +31,7 @@ export async function fetchLive2DModels(): Promise<CharacterModel[]> {
  */
 export async function fetchVRMModels(): Promise<CharacterModel[]> {
     try {
-        const response = await fetch('/api/character/vrm/models');
+        const response = await apiFetch('/api/character/vrm/models');
         if (!response.ok) {
             throw new Error(`Failed to fetch VRM models: ${response.statusText}`);
         }
@@ -39,4 +41,5 @@ export async function fetchVRMModels(): Promise<CharacterModel[]> {
         console.error('Error fetching VRM models:', error);
         return [];
     }
-} 
+}
+ 

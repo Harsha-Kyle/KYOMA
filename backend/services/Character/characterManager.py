@@ -25,10 +25,14 @@ class CharacterModel:
 class CharacterManager:
     """Manages character models (Live2D and VRM)"""
     
-    def __init__(self):
+    def __init__(self, models_dir: Optional[str] = None):
         self.base_path = Path(__file__).parent
-        self.live2d_path = self.base_path / "live2D" / "models"
-        self.vrm_path = self.base_path / "VRM3D" / "models"
+        if models_dir is not None:
+            self.models_dir = Path(models_dir).resolve()
+        else:
+            self.models_dir = self.base_path.resolve()
+        self.live2d_path = self.models_dir / "live2D" / "models"
+        self.vrm_path = self.models_dir / "VRM3D" / "models"
         self._live2d_models: List[CharacterModel] = []
         self._vrm_models: List[CharacterModel] = []
         
@@ -221,43 +225,30 @@ class CharacterManager:
             logger.error(f"Error getting VRM models: {e}", exc_info=True)
             return []
     
-    def get_file_path(self, file_request_path: str) -> Optional[Path]:
+    def get_file_path(self, file_path: str) -> Optional[Path]:
         """Get the absolute file path for serving model files from API request path"""
         try:
-            # Remove the API prefix if present
-            if file_request_path.startswith('/api/character/files/'):
-                relative_path = file_request_path.replace('/api/character/files/', '')
-            else:
-                relative_path = file_request_path
-            
-            # Handle Live2D models
-            if relative_path.startswith('live2D/models/'):
-                file_relative_path = relative_path.replace('live2D/models/', '')
-                absolute_path = self.live2d_path / file_relative_path
-                
-            # Handle VRM models  
-            elif relative_path.startswith('VRM3D/models/'):
-                file_relative_path = relative_path.replace('VRM3D/models/', '')
-                absolute_path = self.vrm_path / file_relative_path
-                
-            # Handle VRM animations
-            elif relative_path.startswith('VRM3D/animations/'):
-                file_relative_path = relative_path.replace('VRM3D/animations/', '')
-                absolute_path = self.get_animations_path() / file_relative_path
-                
-            else:
-                logger.warning(f"Unknown file path pattern: {relative_path}")
+            if file_path.startswith("/") or "\x00" in file_path:
                 return None
-            
-            # Security check: ensure the resolved path is within our allowed directories
-            if not self._is_safe_path(absolute_path):
-                logger.warning(f"Unsafe file path attempted: {absolute_path}")
+
+            # Handle case where full request path or leading prefix was passed
+            clean_path = file_path
+            if clean_path.startswith("api/character/files/"):
+                clean_path = clean_path.replace("api/character/files/", "", 1)
+
+            candidate = (self.models_dir / clean_path).resolve()
+
+            try:
+                candidate.relative_to(self.models_dir)
+            except ValueError:
+                return None  # attempted traversal, e.g. ../../etc/passwd
+
+            if not candidate.exists():
                 return None
-                
-            return absolute_path if absolute_path.exists() else None
-            
+
+            return candidate
         except Exception as e:
-            logger.error(f"Error getting file path for {file_request_path}: {e}", exc_info=True)
+            logger.error(f"Error getting file path for {file_path}: {e}", exc_info=True)
             return None
     
     def _is_safe_path(self, path: Path) -> bool:

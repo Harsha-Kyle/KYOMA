@@ -197,11 +197,21 @@ class PipelineManager {
   interruptCurrentTask() {
     const task = this.getCurrentTask();
     if (task) {
-      console.log("interrupting")
+      console.log("interrupting");
       task.status = "pending_interruption";
       task.interruptionState = { tts: false, llm: false, audio: false };
       this.notify();
     }
+  }
+
+  cancelAllTasks() {
+    console.log("Cancelling all tasks in pipeline");
+    for (const task of this.tasks) {
+      if (task.status !== "task_finished" && task.status !== "cancelled") {
+        task.status = "cancelled";
+      }
+    }
+    this.notify();
   }
 
   markInterruptionState(type: "llm" | "tts" | "audio") {
@@ -214,7 +224,7 @@ class PipelineManager {
       if (type == "llm") task.interruptionState.llm = true;
       if (type == "tts") task.interruptionState.tts = true;
       if (type == "audio") task.interruptionState.audio = true;
-      this.updateTaskStatus(task)
+      this.updateTaskStatus(task);
       this.notify();
     }
   }
@@ -237,6 +247,7 @@ class PipelineManager {
     this.tasks = [];
     this.notify();
   }
+
 }
 
 export const pipelineManager = new PipelineManager();

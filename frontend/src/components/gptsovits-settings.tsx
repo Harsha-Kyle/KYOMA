@@ -11,9 +11,10 @@ export default function GptSovitsSettings() {
 
   useEffect(() => {
     // Initial state
-    setVoices(provider.getVoices());
-    if (provider.getCurrentVoice() === null) {
-      provider.setVoice(voices[0]?.name || "");
+    const currentVoices = provider.getVoices();
+    setVoices(currentVoices);
+    if (provider.getCurrentVoice() === null && currentVoices.length > 0 && currentVoices[0]?.name) {
+      provider.setVoice(currentVoices[0].name);
     }
 
     // Subscribe to changes

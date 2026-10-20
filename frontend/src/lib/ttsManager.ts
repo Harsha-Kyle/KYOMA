@@ -3,8 +3,10 @@ import { globalStateManager } from './globalStateManager';
 import { BaseTTSProvider } from './tts/baseTTSProvider';
 import { GPTSoVITSProvider } from './tts/gptsovitsProvider';
 import { RVCProvider } from './tts/rvcProvider';
+import { KokoroProvider } from './tts/kokoroProvider';
+import { apiFetch } from './api-client';
 
-type TTSProvider = "gpt-sovits" | "rvc";
+type TTSProvider = "gpt-sovits" | "rvc" | "kokoro";
 type TTSUpdateCallback = () => void;
 
 export class TTSManager {
@@ -18,11 +20,15 @@ export class TTSManager {
     public esp32Connected: boolean = false;
 
     constructor() {
-        // Initialize with a temporary value, will be updated when settings are loaded
-        this.selectedProvider = "gpt-sovits";
+        // Read saved provider from the loading-screen settings cache so the
+        // correct TTS engine is active immediately (no flash to gpt-sovits).
+        const cached = (window as Window).__kyoma_settings_cache?.['tts.provider'] as TTSProvider | undefined;
+        const validProviders: TTSProvider[] = ["gpt-sovits", "rvc", "kokoro"];
+        this.selectedProvider = (cached && validProviders.includes(cached)) ? cached : "gpt-sovits";
         this.providers = {
             "gpt-sovits": new GPTSoVITSProvider(),
-            "rvc": new RVCProvider()
+            "rvc": new RVCProvider(),
+            "kokoro": new KokoroProvider(),
         };
         this.setupPipelineSubscription();
     }
@@ -40,7 +46,24 @@ export class TTSManager {
         return this.selectedProvider;
     }
 
-    public setSelectedProvider(provider: TTSProvider) {
+    public syncProviderFromCache(provider: TTSProvider) {
+        if (["gpt-sovits", "rvc", "kokoro"].includes(provider) && this.selectedProvider !== provider) {
+            this.selectedProvider = provider;
+            this.notifySubscribers();
+        }
+    }
+
+    public async setSelectedProvider(provider: TTSProvider) {
+        // Notify backend so it routes /api/tts to the right engine
+        try {
+            await apiFetch("/api/tts/provider", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ provider }),
+            });
+        } catch (e) {
+            console.error("[TTSManager] Failed to update backend provider:", e);
+        }
         this.selectedProvider = provider;
         this.notifySubscribers();
     }
@@ -140,6 +163,7 @@ export class TTSManager {
                 this.currentAudio = null;
             }
             this.isPlaying = false;
+            globalStateManager.updateState("isTTSPlaying", false);
             pipelineManager.markInterruptionState("audio");
             return;
         }
@@ -153,6 +177,7 @@ export class TTSManager {
 
         const audioUrl = task.response[responseIndex].audio;
         this.isPlaying = true;
+        globalStateManager.updateState("isTTSPlaying", true);
 
         const audio = new Audio(audioUrl!);
         this.currentAudio = audio;
@@ -162,9 +187,27 @@ export class TTSManager {
         audio.onended = () => {
             this.isPlaying = false;
             this.currentAudio = null;
+            globalStateManager.updateState("isTTSPlaying", false);
             pipelineManager.markPlaybackFinished(taskId, responseIndex);
         };
     }
+
+    public stopAllAudio() {
+        if (this.currentAudio) {
+            this.currentAudio.pause();
+            this.currentAudio.currentTime = 0;
+            this.currentAudio = null;
+        }
+        if (this.abortController) {
+            this.abortController.abort();
+        }
+        this.isPlaying = false;
+        this.isProcessing = false;
+        globalStateManager.updateState("isTTSPlaying", false);
+        globalStateManager.updateState("ttsLiveVolume", 0);
+    }
+
 }
+
 
 export const ttsManager = new TTSManager(); 
