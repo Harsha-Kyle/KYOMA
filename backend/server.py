@@ -196,9 +196,95 @@ except ImportError:
     pass  # Not using KyomaLLM — no-op
 
 
+async def run_startup_health_check() -> dict:
+    """
+    Concise startup health check covering:
+    - Ollama reachable
+    - gemma4:e2b loaded/available
+    - Kokoro TTS ready
+    - Microphone open / functional
+    - ESP32 connected
+    - Demo mode enabled/disabled
+    Never claims a component is healthy unless actually checked.
+    """
+    import requests
+    import sounddevice as sd
+
+    logger.info("=" * 60)
+    logger.info("KYOMA SYSTEM STARTUP HEALTH CHECK")
+    logger.info("=" * 60)
+
+    report = {}
+
+    # 1. Ollama reachable
+    try:
+        r = requests.get("http://localhost:11434/api/tags", timeout=1.5)
+        ollama_reachable = (r.status_code == 200)
+        models = [m.get("name") for m in r.json().get("models", [])] if ollama_reachable else []
+    except Exception:
+        ollama_reachable = False
+        models = []
+    report["ollama_reachable"] = ollama_reachable
+    logger.info(f"  [1/6] Ollama Service: {'HEALTHY (online)' if ollama_reachable else 'FAIL (unreachable)'}")
+
+    # 2. gemma4:e2b loaded/available
+    gemma_available = any("gemma4:e2b" in m for m in models)
+    report["gemma4_e2b_available"] = gemma_available
+    logger.info(f"  [2/6] gemma4:e2b Model: {'HEALTHY (available)' if gemma_available else 'FAIL (not found in ollama list)'}")
+
+    # 3. Kokoro TTS ready
+    tts_ready = False
+    try:
+        tts_ready = (tts.provider == "kokoro" and getattr(tts, "kokoro", None) is not None)
+    except Exception:
+        pass
+    report["kokoro_tts_ready"] = tts_ready
+    logger.info(f"  [3/6] Kokoro TTS: {'HEALTHY (ready)' if tts_ready else 'FAIL (unavailable)'}")
+
+    # 4. Microphone functional
+    mic_open = False
+    try:
+        devices = sd.query_devices()
+        input_devs = [d for d in devices if d.get('max_input_channels', 0) > 0]
+        mic_open = len(input_devs) > 0 and voice_input.stt_available
+    except Exception:
+        pass
+    report["microphone_ready"] = mic_open
+    logger.info(f"  [4/6] Microphone & STT: {'HEALTHY (detected & models loaded)' if mic_open else 'FAIL (no mic / STT init error)'}")
+
+    # 5. ESP32 connected
+    esp32_conn = len(esp32_clients) > 0
+    report["esp32_connected"] = esp32_conn
+    logger.info(f"  [5/6] ESP32 Companion: {'CONNECTED' if esp32_conn else 'STANDBY (no clients connected)'}")
+
+    # 6. Demo mode
+    demo_active = False
+    try:
+        kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
+        if kyoma_path not in sys.path:
+            sys.path.append(kyoma_path)
+        from demo_safety import is_demo_mode_active
+        demo_active = is_demo_mode_active()
+    except Exception as _dme:
+        logger.debug(f"[HealthCheck] Demo mode check: {_dme}")
+    report["demo_mode_active"] = demo_active
+    logger.info(f"  [6/6] Demo Mode Safety: {'ENABLED (strict presentation protections active)' if demo_active else 'DISABLED'}")
+    logger.info("=" * 60)
+
+    return report
+
+
+@app.get("/api/health/startup")
+async def get_startup_health():
+    """API endpoint to query startup health report."""
+    report = await run_startup_health_check()
+    all_ok = report["ollama_reachable"] and report["gemma4_e2b_available"] and report["kokoro_tts_ready"] and report["microphone_ready"]
+    return JSONResponse(status_code=200 if all_ok else 503, content={"status": "healthy" if all_ok else "degraded", "checks": report})
+
+
 @app.on_event("startup")
 async def _on_startup():
-    """Register the KyomaLLM broadcast hook once the event loop is running."""
+    """Register the KyomaLLM broadcast hook and VoiceInput state callback once event loop is running."""
     try:
         from services.LLM.KyomaLLM import set_search_broadcast_hook
         loop = asyncio.get_event_loop()
@@ -206,6 +292,19 @@ async def _on_startup():
         logger.info("[Search] KyomaLLM broadcast hook registered.")
     except Exception as _e:
         logger.warning(f"[Search] Could not register KyomaLLM broadcast hook: {_e}")
+
+    try:
+        # Connect VoiceInput state transitions to WebUI and ESP32
+        voice_input.state_callback = broadcast_state_all
+        logger.info("[VoiceInput] state_callback connected to broadcast_state_all.")
+    except Exception as _e:
+        logger.warning(f"[VoiceInput] Could not connect state_callback: {_e}")
+
+    # Startup Health Check
+    try:
+        await run_startup_health_check()
+    except Exception as _e:
+        logger.error(f"[HealthCheck] Error during startup health check: {_e}")
 
 # *******************************
 # WebUI
@@ -246,6 +345,28 @@ async def mute_recording():
 async def unmute_recording():
     voice_input.unmute()
     return Response(status_code=200)
+
+@app.post("/api/record/push_to_talk")
+async def push_to_talk_trigger():
+    """
+    Bypasses wake-word detection directly for WebUI Push-To-Talk button.
+    Opens the listening window immediately without requiring 'Hey Kyoma'.
+    """
+    import time
+    voice_input._wake_active_until = time.time() + 10.0
+    voice_input.system_state = "LISTENING"
+    await broadcast_state_all("LISTENING")
+    return JSONResponse(content={"status": "ok", "mode": "push_to_talk_active", "window_s": 10.0})
+
+@app.post("/api/record/input_mode")
+async def set_input_mode(mode: str = Form(...)):
+    """Set input mode: always_listening | wake_word | push_to_talk"""
+    clean_mode = mode.lower().strip()
+    if clean_mode not in ("always_listening", "wake_word", "push_to_talk"):
+        return JSONResponse(status_code=400, content={"error": f"Invalid mode: {mode}"})
+    voice_input.input_mode = clean_mode
+    logger.info(f"[Server] VoiceInput input_mode switched to: {clean_mode}")
+    return JSONResponse(content={"status": "ok", "input_mode": clean_mode})
 
 
 @app.websocket("/ws/audio")

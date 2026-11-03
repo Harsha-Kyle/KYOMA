@@ -16,25 +16,23 @@ from ..lib.LAV_logger import logger
 
 def _load_vad_config() -> dict:
     """
-    Load VAD-related settings from kyoma_config.json (Kyoma/ directory).
+    Load VAD and input-mode settings from kyoma_config.json (Kyoma/ directory).
     Falls back to safe defaults if the file is absent or malformed.
 
     Supported keys:
-        vad_silence_duration  (float, seconds)  — how long sub-threshold audio
-                              must persist before an utterance is considered
-                              complete.  Default: 0.45 s.
-        vad_speech_threshold  (float, 0–1)      — minimum Silero probability
-                              to count a 512-sample chunk as speech.
-                              Default: 0.3 (original value; do not change
-                              without measured justification).
+        vad_silence_duration  (float, seconds)  — Default: 0.45 s.
+        vad_speech_threshold  (float, 0–1)      — Default: 0.3.
+        input_mode            (str)             — 'always_listening' | 'wake_word' | 'push_to_talk'.
+                                                  Default: 'always_listening'.
+        wake_word_timeout     (float, seconds)  — Command window after wake chime. Default: 6.0 s.
     """
     defaults = {
         "vad_silence_duration": 0.45,
         "vad_speech_threshold": 0.3,
+        "input_mode": "always_listening",
+        "wake_word_timeout": 6.0,
     }
     try:
-        # kyoma_config.json lives three levels above this file:
-        # backend/services/Input/ → backend/ → (root) → Kyoma/
         base = os.path.dirname(__file__)
         cfg_path = os.path.abspath(
             os.path.join(base, "..", "..", "..", "Kyoma", "kyoma_config.json")
@@ -42,9 +40,14 @@ def _load_vad_config() -> dict:
         if os.path.exists(cfg_path):
             with open(cfg_path, "r", encoding="utf-8") as f:
                 user_cfg = json.load(f)
-            for key in defaults:
-                if key in user_cfg:
-                    defaults[key] = float(user_cfg[key])
+            if "vad_silence_duration" in user_cfg:
+                defaults["vad_silence_duration"] = float(user_cfg["vad_silence_duration"])
+            if "vad_speech_threshold" in user_cfg:
+                defaults["vad_speech_threshold"] = float(user_cfg["vad_speech_threshold"])
+            if "input_mode" in user_cfg:
+                defaults["input_mode"] = str(user_cfg["input_mode"]).lower().strip()
+            if "wake_word_timeout" in user_cfg:
+                defaults["wake_word_timeout"] = float(user_cfg["wake_word_timeout"])
     except Exception as e:
         logger.warning(f"[VAD] Could not load kyoma_config.json for VAD settings: {e}")
     return defaults
@@ -78,10 +81,18 @@ class VoiceInput:
         self._vad_silence_duration: float = _vad_cfg["vad_silence_duration"]  # seconds
         self._vad_speech_threshold: float = _vad_cfg["vad_speech_threshold"]
         self._silence_wait_samples: int = int(self._vad_silence_duration * self.SAMPLING_RATE)
+        self.input_mode: str = _vad_cfg.get("input_mode", "always_listening")
+        self.wake_word_timeout: float = _vad_cfg.get("wake_word_timeout", 6.0)
+        self.system_state: str = "IDLE"  # IDLE | LISTENING | THINKING | SPEAKING
+        self._wake_active_until: float = 0.0
+        self.state_callback = None  # async def callback(state: str) -> None
+        self.barge_in_callback = None  # callable to interrupt active TTS/speaking
+
         logger.info(
             f"[VAD] silence_duration={self._vad_silence_duration:.3f}s "
             f"({self._silence_wait_samples} samples) | "
-            f"speech_threshold={self._vad_speech_threshold:.2f}"
+            f"speech_threshold={self._vad_speech_threshold:.2f} | "
+            f"input_mode={self.input_mode}"
         )
 
         # ── Per-utterance diagnostic accumulators ───────────────────────────
@@ -242,8 +253,9 @@ class VoiceInput:
                 self.sentence_audio_buffer.extend(post)
 
                 # ── Per-utterance diagnostics ──────────────────────────────
+                _all_samples = np.array(self.sentence_audio_buffer, dtype=np.float32)
+                _utt_dur_s = len(_all_samples) / self.SAMPLING_RATE
                 if self._utt_probs:
-                    _all_samples = np.array(self.sentence_audio_buffer, dtype=np.float32)
                     _rms = float(np.sqrt(np.mean(_all_samples ** 2))) if len(_all_samples) else 0.0
                     _avg_prob = float(np.mean(self._utt_probs))
                     _max_prob = float(np.max(self._utt_probs))
@@ -251,12 +263,30 @@ class VoiceInput:
                         f"[VAD_DIAG] utterance_end | "
                         f"avg_speech_prob={_avg_prob:.3f} | max_speech_prob={_max_prob:.3f} | "
                         f"peak_amplitude={self._utt_peak:.4f} | rms={_rms:.4f} | "
-                        f"duration_s={len(_all_samples)/self.SAMPLING_RATE:.2f} | "
+                        f"duration_s={_utt_dur_s:.2f} | "
                         f"silence_dur_s={self._vad_silence_duration:.3f} | "
                         f"threshold={self._vad_speech_threshold:.2f}"
                     )
 
+                # ── Barge-in check ──────────────────────────────────────────
+                if self.system_state == "SPEAKING" and _utt_dur_s >= 0.3:
+                    logger.info("[VoiceInput] Barge-in detected during SPEAKING! Interrupting audio.")
+                    if self.barge_in_callback:
+                        try:
+                            self.barge_in_callback()
+                        except Exception as _bie:
+                            logger.debug(f"[VoiceInput] Barge-in callback error: {_bie}")
+                    self.system_state = "LISTENING"
+                    if self.state_callback:
+                        asyncio.create_task(self.state_callback("LISTENING"))
+
                 async with self.processing_lock:
+                    # Ignore utterances shorter than 0.4 seconds per spec
+                    if _utt_dur_s < 0.4:
+                        self.vad_iterator.reset_states()
+                        self._reset_buffers()
+                        continue
+
                     # Capture the current buffer and reset immediately to prevent concurrent calls
                     # on the same buffer
                     audio_array = np.array(self.sentence_audio_buffer)
@@ -270,21 +300,64 @@ class VoiceInput:
                     )
 
                     if transcribed_text and transcribed_text not in self.whisper_filter_list:
-                        if transcribed_text != self.last_transcription:
-                            self.last_transcription = transcribed_text
-                            logger.info(f"[STT] Transcribed: {transcribed_text}")
+                        # ── Wake Word & State Flow ─────────────────────────
+                        active_text = transcribed_text
+                        import time
+                        now = time.time()
+
+                        if self.input_mode == "wake_word":
+                            import re
+                            wake_pat = re.compile(
+                                r"\b(?:hey|hi|ok|okay)\s+(?:kyoma|coma|koma|kioma)\b|\bkyoma\b",
+                                re.IGNORECASE
+                            )
+                            m = wake_pat.search(transcribed_text)
+                            if m:
+                                remainder = re.sub(r"^[,\.\?!;:\s\-]+", "", transcribed_text[m.end():]).strip()
+                                if remainder:
+                                    # Wake word and command in same utterance
+                                    active_text = remainder
+                                    self.system_state = "THINKING"
+                                    if self.state_callback:
+                                        asyncio.create_task(self.state_callback("THINKING"))
+                                else:
+                                    # Wake word alone: open 6-second window, transition to LISTENING
+                                    self._wake_active_until = now + self.wake_word_timeout
+                                    self.system_state = "LISTENING"
+                                    logger.info(f"[WakeWord] Wake word detected alone. Window open for {self.wake_word_timeout}s.")
+                                    if self.state_callback:
+                                        asyncio.create_task(self.state_callback("LISTENING"))
+                                    continue
+                            elif now < self._wake_active_until:
+                                # Within open 6-second command window
+                                self._wake_active_until = 0.0
+                                active_text = transcribed_text
+                                self.system_state = "THINKING"
+                                if self.state_callback:
+                                    asyncio.create_task(self.state_callback("THINKING"))
+                            else:
+                                # Wake-word mode active but wake word not detected; ignore
+                                logger.debug(f"[WakeWord] Utterance ignored (no wake word, outside window): {transcribed_text!r}")
+                                continue
+                        elif self.input_mode == "push_to_talk":
+                            # In PTT mode, standard background mic capture is bypassed unless triggered
+                            pass
+
+                        if active_text != self.last_transcription:
+                            self.last_transcription = active_text
+                            logger.info(f"[STT] Transcribed: {active_text}")
                             # Notify frontend WebSocket clients (if any are connected)
                             dead_clients = set()
                             for client in list(clients):
                                 try:
-                                    await client.send_json({"type": "transcription", "text": transcribed_text})
+                                    await client.send_json({"type": "transcription", "text": active_text})
                                 except Exception:
                                     dead_clients.add(client)
                             clients -= dead_clients
                             # In ESP32 mode, trigger the autonomous LLM→TTS pipeline ONLY if no frontend WebUI client is connected.
                             # If frontend is connected, the frontend will handle it via its WebSocket event.
                             if self.esp32_mode and self.esp32_pipeline_callback and len(clients) == 0:
-                                asyncio.create_task(self.esp32_pipeline_callback(transcribed_text))
+                                asyncio.create_task(self.esp32_pipeline_callback(active_text))
 
     def process_speech(self, audio_data):
         with wave.open(self.MIC_OUTPUT_PATH, "wb") as wf:
@@ -294,7 +367,11 @@ class VoiceInput:
             wf.writeframes((audio_data * 32768.0).astype(np.int16).tobytes())
 
         transcribed_text = ''
-        segments, _ = self.whisper_model.transcribe(self.MIC_OUTPUT_PATH, language=self.input_language)
+        segments, _ = self.whisper_model.transcribe(
+            self.MIC_OUTPUT_PATH,
+            language=self.input_language,
+            initial_prompt="Kyoma, hey Kyoma, okay Kyoma"
+        )
         for segment in segments:
             transcribed_text += segment.text
 
