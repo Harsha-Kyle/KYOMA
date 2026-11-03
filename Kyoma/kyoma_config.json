@@ -1,1 +1,6 @@
-{"ollama_model": "gemma4:e2b"}
+{
+    "ollama_model": "gemma4:e2b",
+    "demo_mode": true,
+    "vad_silence_duration": 0.45,
+    "vad_speech_threshold": 0.3
+}

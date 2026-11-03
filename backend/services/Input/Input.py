@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import wave
 from fastapi import WebSocket
@@ -8,6 +9,45 @@ import torch
 from faster_whisper import WhisperModel
 from silero_vad import load_silero_vad, VADIterator
 from ..lib.LAV_logger import logger
+
+# ---------------------------------------------------------------------------
+# VAD configuration helpers
+# ---------------------------------------------------------------------------
+
+def _load_vad_config() -> dict:
+    """
+    Load VAD-related settings from kyoma_config.json (Kyoma/ directory).
+    Falls back to safe defaults if the file is absent or malformed.
+
+    Supported keys:
+        vad_silence_duration  (float, seconds)  — how long sub-threshold audio
+                              must persist before an utterance is considered
+                              complete.  Default: 0.45 s.
+        vad_speech_threshold  (float, 0–1)      — minimum Silero probability
+                              to count a 512-sample chunk as speech.
+                              Default: 0.3 (original value; do not change
+                              without measured justification).
+    """
+    defaults = {
+        "vad_silence_duration": 0.45,
+        "vad_speech_threshold": 0.3,
+    }
+    try:
+        # kyoma_config.json lives three levels above this file:
+        # backend/services/Input/ → backend/ → (root) → Kyoma/
+        base = os.path.dirname(__file__)
+        cfg_path = os.path.abspath(
+            os.path.join(base, "..", "..", "..", "Kyoma", "kyoma_config.json")
+        )
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                user_cfg = json.load(f)
+            for key in defaults:
+                if key in user_cfg:
+                    defaults[key] = float(user_cfg[key])
+    except Exception as e:
+        logger.warning(f"[VAD] Could not load kyoma_config.json for VAD settings: {e}")
+    return defaults
 
 
 class VoiceInput:
@@ -21,21 +61,41 @@ class VoiceInput:
         "thank you very much", "there is no message", "on the top of the door",
         "15%", "im going to put it in the fridge", "i", "okay", "bye", "so", "im sorry", "there are no messages"
     ]
+    # Class-level defaults (preserved for backward compatibility).
+    # Effective runtime values are set per-instance from kyoma_config.json.
     SPEECH_THRESHOLD = 0.3
-    SILENCE_WAIT_TIME = 0.1 * SAMPLING_RATE
+    SILENCE_WAIT_TIME = 0.1 * SAMPLING_RATE   # original 0.1 s (kept as class attr)
     PRE_SPEECH_SAMPLES = 0.5 * SAMPLING_RATE
     POST_SPEECH_SAMPLES = 0.5 * SAMPLING_RATE
-    
+
     running = False
 
     def __init__(self):
+        # ── Load configurable VAD parameters ───────────────────────────────
+        _vad_cfg = _load_vad_config()
+        # Instance-level overrides so they can differ per config without
+        # touching the class-level constants (which stay at original 0.1 s).
+        self._vad_silence_duration: float = _vad_cfg["vad_silence_duration"]  # seconds
+        self._vad_speech_threshold: float = _vad_cfg["vad_speech_threshold"]
+        self._silence_wait_samples: int = int(self._vad_silence_duration * self.SAMPLING_RATE)
+        logger.info(
+            f"[VAD] silence_duration={self._vad_silence_duration:.3f}s "
+            f"({self._silence_wait_samples} samples) | "
+            f"speech_threshold={self._vad_speech_threshold:.2f}"
+        )
+
+        # ── Per-utterance diagnostic accumulators ───────────────────────────
+        # Cleared at the start of each speech event; logged when it ends.
+        self._utt_probs: list = []       # all speech_prob values during utterance
+        self._utt_peak: float = 0.0      # peak absolute amplitude in utterance
+
         self._reset_buffers()
         self.last_transcription = None
         self.esp32_mode = False
         # Optional async callback (set by server) called with transcribed text in ESP32 mode.
         # Signature: async def callback(text: str) -> None
         self.esp32_pipeline_callback = None
-        
+
         # Initialize AI models lazily/at instance level to avoid sys.meta_path issues on 3.13
         try:
             self.vad_model = load_silero_vad()
@@ -57,6 +117,9 @@ class VoiceInput:
         self.tmp_audio_buffer = []
         self.silent_samples = 0
         self.started_speaking = False
+        # Reset per-utterance diagnostics
+        self._utt_probs = []
+        self._utt_peak = 0.0
 
     def mute(self):
         """Immediately discard incoming audio and purge all buffers."""
@@ -152,8 +215,12 @@ class VoiceInput:
                     dead_clients.add(client)
             clients -= dead_clients
 
-            if speech_prob < self.SPEECH_THRESHOLD:
-                if self.silent_samples <= self.SILENCE_WAIT_TIME:
+            # Use instance-level configurable threshold and silence duration
+            _threshold = self._vad_speech_threshold
+            _silence_samples = self._silence_wait_samples
+
+            if speech_prob < _threshold:
+                if self.silent_samples <= _silence_samples:
                     self.silent_samples += 512
             else:
                 self.silent_samples = 0
@@ -162,12 +229,32 @@ class VoiceInput:
                     self.sentence_audio_buffer = list(pre)
                 self.started_speaking = True
 
+            # Accumulate per-utterance diagnostics during active speech
             if self.started_speaking:
                 self.sentence_audio_buffer.extend(chunk)
+                self._utt_probs.append(speech_prob)
+                chunk_peak = float(np.max(np.abs(chunk)))
+                if chunk_peak > self._utt_peak:
+                    self._utt_peak = chunk_peak
 
-            if self.started_speaking and self.silent_samples > self.SILENCE_WAIT_TIME:
+            if self.started_speaking and self.silent_samples > _silence_samples:
                 post = self.tmp_audio_buffer[:int(self.POST_SPEECH_SAMPLES)]
                 self.sentence_audio_buffer.extend(post)
+
+                # ── Per-utterance diagnostics ──────────────────────────────
+                if self._utt_probs:
+                    _all_samples = np.array(self.sentence_audio_buffer, dtype=np.float32)
+                    _rms = float(np.sqrt(np.mean(_all_samples ** 2))) if len(_all_samples) else 0.0
+                    _avg_prob = float(np.mean(self._utt_probs))
+                    _max_prob = float(np.max(self._utt_probs))
+                    logger.info(
+                        f"[VAD_DIAG] utterance_end | "
+                        f"avg_speech_prob={_avg_prob:.3f} | max_speech_prob={_max_prob:.3f} | "
+                        f"peak_amplitude={self._utt_peak:.4f} | rms={_rms:.4f} | "
+                        f"duration_s={len(_all_samples)/self.SAMPLING_RATE:.2f} | "
+                        f"silence_dur_s={self._vad_silence_duration:.3f} | "
+                        f"threshold={self._vad_speech_threshold:.2f}"
+                    )
 
                 async with self.processing_lock:
                     # Capture the current buffer and reset immediately to prevent concurrent calls
@@ -247,8 +334,11 @@ class VoiceInput:
             speech_prob = self.vad_model(torch.from_numpy(chunk), self.SAMPLING_RATE).item()
             print(f"Speech probability: {speech_prob:.2f}")
 
-            if speech_prob < self.SPEECH_THRESHOLD:
-                if self.silent_samples <= self.SILENCE_WAIT_TIME:
+            _threshold = self._vad_speech_threshold
+            _silence_samples = self._silence_wait_samples
+
+            if speech_prob < _threshold:
+                if self.silent_samples <= _silence_samples:
                     self.silent_samples += 512
             else:
                 self.silent_samples = 0
@@ -259,10 +349,26 @@ class VoiceInput:
 
             if self.started_speaking:
                 self.sentence_audio_buffer.extend(chunk)
+                self._utt_probs.append(speech_prob)
+                chunk_peak = float(np.max(np.abs(chunk)))
+                if chunk_peak > self._utt_peak:
+                    self._utt_peak = chunk_peak
 
-            if self.started_speaking and self.silent_samples > self.SILENCE_WAIT_TIME:
+            if self.started_speaking and self.silent_samples > _silence_samples:
                 post = self.tmp_audio_buffer[:int(self.POST_SPEECH_SAMPLES)]
                 self.sentence_audio_buffer.extend(post)
+
+                # ── Per-utterance diagnostics ──────────────────────────────
+                if self._utt_probs:
+                    _all_samples = np.array(self.sentence_audio_buffer, dtype=np.float32)
+                    _rms = float(np.sqrt(np.mean(_all_samples ** 2))) if len(_all_samples) else 0.0
+                    _avg_prob = float(np.mean(self._utt_probs))
+                    _max_prob = float(np.max(self._utt_probs))
+                    print(
+                        f"[VAD_DIAG] avg_prob={_avg_prob:.3f} max_prob={_max_prob:.3f} "
+                        f"peak={self._utt_peak:.4f} rms={_rms:.4f} "
+                        f"dur_s={len(_all_samples)/self.SAMPLING_RATE:.2f}"
+                    )
 
                 transcribed_text = self.process_speech(np.array(self.sentence_audio_buffer))
                 if transcribed_text:
