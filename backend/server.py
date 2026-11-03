@@ -157,6 +157,56 @@ async def broadcast_esp32_state(state: str):
             dead_clients.add(client)
     esp32_clients.difference_update(dead_clients)
 
+
+async def broadcast_state_all(state: str):
+    """
+    Broadcast a state update to both the ESP32 and all WebUI WebSocket clients.
+    Used during search to send 'thinking' without blocking the event loop.
+    """
+    await broadcast_esp32_state(state)
+    # Also notify WebUI audio clients with a JSON state message
+    dead_clients = set()
+    for client in list(clients):
+        try:
+            await client.send_json({"type": "state", "state": state})
+        except Exception:
+            dead_clients.add(client)
+    clients.difference_update(dead_clients)
+
+
+# Register the search broadcast hook so KyomaLLM can send state from threads.
+try:
+    from services.LLM.KyomaLLM import set_search_broadcast_hook
+    import asyncio as _asyncio
+    # Hook is registered at startup; loop reference is captured when first search fires.
+    def _kyoma_search_state_factory(state: str):
+        return broadcast_state_all(state)
+    # Defer actual loop capture to runtime since event loop isn't running at import time.
+    _kyoma_broadcast_registered = False
+    def _register_kyoma_hook():
+        global _kyoma_broadcast_registered
+        if not _kyoma_broadcast_registered:
+            try:
+                loop = _asyncio.get_event_loop()
+                set_search_broadcast_hook(loop, _kyoma_search_state_factory)
+                _kyoma_broadcast_registered = True
+            except Exception as _rh_err:
+                logger.warning(f"Could not register KyomaLLM search hook: {_rh_err}")
+except ImportError:
+    pass  # Not using KyomaLLM — no-op
+
+
+@app.on_event("startup")
+async def _on_startup():
+    """Register the KyomaLLM broadcast hook once the event loop is running."""
+    try:
+        from services.LLM.KyomaLLM import set_search_broadcast_hook
+        loop = asyncio.get_event_loop()
+        set_search_broadcast_hook(loop, broadcast_state_all)
+        logger.info("[Search] KyomaLLM broadcast hook registered.")
+    except Exception as _e:
+        logger.warning(f"[Search] Could not register KyomaLLM broadcast hook: {_e}")
+
 # *******************************
 # WebUI
 # *******************************
