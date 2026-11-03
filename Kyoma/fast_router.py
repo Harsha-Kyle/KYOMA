@@ -31,6 +31,7 @@ import os
 import random
 import traceback
 from typing import Optional, Tuple
+from demo_safety import check_demo_mode_refusal
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Lazy tool loader — avoids circular imports & speeds up module load time
@@ -51,6 +52,7 @@ def _get_tools() -> dict:
                                    get_performance, get_disk_usage)
     from app_utils        import (open_application, open_browser,
                                   minimize_application, restore_application, close_application)
+    from reminder_utils   import list_active_reminders
     _tools = {
         # Volume
         "set_volume":          set_volume,
@@ -87,6 +89,8 @@ def _get_tools() -> dict:
         "minimize_application":minimize_application,
         "restore_application": restore_application,
         "close_application":   close_application,
+        # Reminders
+        "list_active_reminders": list_active_reminders,
     }
     return _tools
 
@@ -217,7 +221,11 @@ _RE_PREV       = re.compile(r"\b(?:previous\s+(?:track|song|music)|prev(?:\s+(?:
 _RE_RESTART    = re.compile(r"\b(?:restart(?:\s+(?:track|song|music))?|replay(?:\s+(?:this|track|song|music))?|from\s+(?:the\s+)?(?:beginning|start)|start\s+(?:this\s+)?over|beginning\s+of\s+(?:track|song))\b", _F)
 
 # ── Screenshot & Lock ─────────────────────────────────────────────────────────
-_RE_SCREENSHOT = re.compile(r"\b(?:(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?|grab\s+(?:a\s+)?)?screenshot(?:\s+(?:now|please))?|screen(?:\s+)?shot|screen\s+capture|screengrab)\b", _F)
+_RE_SCREENSHOT = re.compile(r"\b(?:(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?|grab\s+(?:a\s+)?)?screenshot(?:\s+(?:now|please))?|screen(?:\s+)?shot|screen\s+capture|screengrab|capture\s+screen|grab\s+screen)\b", _F)
+# ── Reminders & Capabilities Patterns ─────────────────────────────────────────
+_RE_REMINDERS  = re.compile(r"\b(?:(?:list|show|view|check|read|get)(?:\s+all)?(?:\s+my)?\s+reminders?|reminders?\s+(?:list|status)|what\s+are\s+my\s+reminders?|do\s+i\s+have\s+any\s+reminders?)\b", _F)
+_RE_CAPABILITIES = re.compile(r"\b(?:what\s+can\s+you\s+do|what\s+are\s+your\s+(?:capabilities|features)|help\s+me|who\s+are\s+you|introduce\s+yourself)\b", _F)
+
 _RE_LOCK       = re.compile(r"\b(?:lock(?:\s+(?:the\s+)?(?:screen|pc|computer|system|machine))?|(?:screen|pc|computer)\s+lock)\b", _F)
 
 # ── System Info ───────────────────────────────────────────────────────────────
@@ -446,6 +454,9 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         return _say("screenshot"), True
 
     if _RE_LOCK.search(text):
+        is_refused, refusal = check_demo_mode_refusal("lock_screen")
+        if is_refused:
+            return refusal, True
         t["lock_screen"]()
         return _say("lock"), True
 
@@ -474,6 +485,24 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
     if _RE_VPN.search(text):
         result = _extract_result(t["get_vpn_status"]())
         return _say("vpn_status", r=result), True
+
+
+    # ── REMINDERS ─────────────────────────────────────────────────────────────
+    if _RE_REMINDERS.search(text):
+        raw = t["list_active_reminders"]()
+        if not raw or "No active reminders" in str(raw):
+            return "You currently have no active reminders scheduled.", True
+        clean = str(raw).strip()
+        lines = [l.strip() for l in clean.splitlines() if l.strip()]
+        if len(lines) > 1:
+            clean = " ".join(lines[:3])
+        return clean, True
+
+    # ── CANNED "WHAT CAN YOU DO" ──────────────────────────────────────────────
+    if _RE_CAPABILITIES.search(text):
+        return ("I am KYOMA, your physical AI desktop companion. "
+                "I can adjust volume and brightness, launch applications like Notepad, Calculator, and File Explorer, "
+                "take screenshots, check your battery and system performance, manage reminders, and search the web."), True
 
     if _RE_PERF.search(text):
         result = _extract_result(t["get_performance"]())
@@ -522,6 +551,9 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
     if m := _RE_CLOSE.search(text):
         name = m.group(1).strip()
         if _is_plausible_name(name):
+            is_refused, refusal = check_demo_mode_refusal("close_application", {"name": name})
+            if is_refused:
+                return refusal, True
             result = t["close_application"](name)
             r = _extract_result(result)
             if "error" in r.lower() or "not found" in r.lower():
