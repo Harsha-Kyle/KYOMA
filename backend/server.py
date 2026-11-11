@@ -306,6 +306,28 @@ async def _on_startup():
     except Exception as _e:
         logger.error(f"[HealthCheck] Error during startup health check: {_e}")
 
+    # Non-blocking Gemma model warm-up in background thread
+    async def _async_warmup():
+        def _warm():
+            try:
+                import ollama
+                logger.info("[Warmup] Warming up Ollama Gemma model in background...")
+                t_w0 = time.perf_counter()
+                ollama.chat(
+                    model="gemma4:e2b",
+                    messages=[{"role": "user", "content": "hi"}],
+                    keep_alive="1h",
+                    think=False,
+                    options={"temperature": 0.2, "num_predict": 1}
+                )
+                logger.info(f"[Warmup] Gemma model warmed up in {time.perf_counter() - t_w0:.2f}s")
+            except Exception as _we:
+                logger.warning(f"[Warmup] Gemma model warmup failed (non-critical): {_we}")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _warm)
+
+    asyncio.create_task(_async_warmup())
+
 # *******************************
 # WebUI
 # *******************************

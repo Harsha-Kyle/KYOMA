@@ -21,13 +21,13 @@ class LLM:
         self.all_model_data = None
         self.keep_model_loaded = False
         
-        # Default sampling parameters
+        # Default sampling parameters (deterministic for commands)
         self.sampling_params = {
             'top_k': 40,
             'top_p': 0.95,
             'min_p': 0.05,
             'repeat_penalty': 1.1,
-            'temperature': 0.8,
+            'temperature': 0.2,
             'seed': -1
         }
 

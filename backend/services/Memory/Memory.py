@@ -27,16 +27,12 @@ class Memory:
                 self.client.set_model("sentence-transformers/all-MiniLM-L6-v2")
                 self.is_available = True
             except Exception as e:
-                logger.error(f"[Memory] Initial fastembed model load failed: {e}. Attempting cache cleanup and retry...")
-                # If cache was corrupted, try removing corrupted fastembed cache and retry once
-                cache_dir = os.path.join(os.environ.get("TEMP", ""), "fastembed_cache")
-                if os.path.exists(cache_dir):
-                    import shutil
-                    shutil.rmtree(cache_dir, ignore_errors=True)
+                logger.warning(f"[Memory] Initial fastembed model load failed: {e}. Checking local cache...")
+                # Do not rmtree local cache in demo mode or without internet; only retry once with existing cache
                 try:
                     self.client.set_model("sentence-transformers/all-MiniLM-L6-v2")
                     self.is_available = True
-                    logger.info("[Memory] Successfully loaded embedding model after cache reset.")
+                    logger.info("[Memory] Successfully loaded embedding model from local cache.")
                 except Exception as e2:
                     logger.warning(f"[Memory] Fastembed model load failed ({e2}). Memory will run in degraded mode.")
                     self.is_available = False
