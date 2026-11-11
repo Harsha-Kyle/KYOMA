@@ -35,8 +35,26 @@ script_dir = Path(__file__).resolve().parent
 reminder_folder = script_dir / "Reminders logs"
 reminder_folder.mkdir(parents=True, exist_ok=True)
 
-# Correct file paths
-DB_PATH = reminder_folder / "reminders.db"
+# Correct file paths (with Demo mode isolation support)
+def get_db_path():
+    try:
+        from demo_safety import is_demo_mode_active
+        if is_demo_mode_active():
+            demo_db = reminder_folder / "reminders_demo.db"
+            if not os.path.exists(demo_db):
+                init_db(demo_db)
+            return demo_db
+    except Exception:
+        pass
+    return reminder_folder / "reminders.db"
+
+class _DynamicDBPath:
+    def __fspath__(self):
+        return str(get_db_path())
+    def __str__(self):
+        return str(get_db_path())
+
+DB_PATH = _DynamicDBPath()
 LOG_PATH = reminder_folder / "reminder.log"
 
 toaster = ToastNotifier()
@@ -55,9 +73,10 @@ def log_event(event):
 # ----------------------
 # DATABASE SETUP
 # ----------------------
-def init_db():
-    if not os.path.exists(DB_PATH):
-        conn = sqlite3.connect(DB_PATH)
+def init_db(target_path=None):
+    db_file = target_path or get_db_path()
+    if not os.path.exists(db_file):
+        conn = sqlite3.connect(db_file)
         c = conn.cursor()
         c.execute("""
             CREATE TABLE reminders (
@@ -521,7 +540,7 @@ start_scheduler()
 # HELPER
 # ----------------------
 def list_active_reminders():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(get_db_path())
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -538,12 +557,16 @@ def list_active_reminders():
         return "No active reminders found."
 
     lines = []
-    for row in rows:
+    # Limit spoken reminder listings to three items and remove emoji
+    for row in rows[:3]:
         rid, title, msg, time_str, repeat_interval, status = row
-        recurrence_text = f"(repeat: {repeat_interval})" if repeat_interval else "(one-time)"
-        lines.append(f"{title} — scheduled at {time_str} {recurrence_text}")
+        # Clean emojis from title for TTS clarity
+        clean_title = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf🎉🎂🔔]+', '', title).strip()
+        recurrence_text = f"(repeat: {repeat_interval})" if repeat_interval and repeat_interval != "one time" else ""
+        rec_str = f" {recurrence_text}" if recurrence_text else ""
+        lines.append(f"{clean_title} scheduled at {time_str}{rec_str}.")
 
-    return "Active reminders:\n" + "\n".join(lines)
+    return "Active reminders: " + " ".join(lines)
 
 
 

@@ -52,7 +52,7 @@ def _get_tools() -> dict:
                                    get_performance, get_disk_usage)
     from app_utils        import (open_application, open_browser,
                                   minimize_application, restore_application, close_application)
-    from reminder_utils   import list_active_reminders
+    from reminder_utils   import list_active_reminders, add_reminder
     _tools = {
         # Volume
         "set_volume":          set_volume,
@@ -91,6 +91,7 @@ def _get_tools() -> dict:
         "close_application":   close_application,
         # Reminders
         "list_active_reminders": list_active_reminders,
+        "add_reminder":          add_reminder,
     }
     return _tools
 
@@ -221,17 +222,22 @@ _RE_PREV       = re.compile(r"\b(?:previous\s+(?:track|song|music)|prev(?:\s+(?:
 _RE_RESTART    = re.compile(r"\b(?:restart(?:\s+(?:track|song|music))?|replay(?:\s+(?:this|track|song|music))?|from\s+(?:the\s+)?(?:beginning|start)|start\s+(?:this\s+)?over|beginning\s+of\s+(?:track|song))\b", _F)
 
 # ── Screenshot & Lock ─────────────────────────────────────────────────────────
-_RE_SCREENSHOT = re.compile(r"\b(?:(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?|grab\s+(?:a\s+)?)?screenshot(?:\s+(?:now|please))?|screen(?:\s+)?shot|screen\s+capture|screengrab|capture\s+screen|grab\s+screen)\b", _F)
+_RE_SCREENSHOT = re.compile(r"\b(?:(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?|grab\s+(?:a\s+)?)?(?:screenshot|screen\s*shot|ss)(?:\s+and\s+save\s+it\s+as\s+([a-zA-Z0-9_\-]+))?(?:\s+(?:now|please))?|screen(?:\s+)?shot|screen\s+capture|screengrab|capture\s+screen|grab\s+screen)\b", _F)
 # ── Reminders & Capabilities Patterns ─────────────────────────────────────────
 _RE_REMINDERS  = re.compile(r"\b(?:(?:list|show|view|check|read|get)(?:\s+all)?(?:\s+my)?\s+reminders?|reminders?\s+(?:list|status)|what\s+are\s+my\s+reminders?|do\s+i\s+have\s+any\s+reminders?)\b", _F)
-_RE_CAPABILITIES = re.compile(r"\b(?:what\s+can\s+you\s+do|what\s+are\s+your\s+(?:capabilities|features)|help\s+me|who\s+are\s+you|introduce\s+yourself)\b", _F)
+_RE_CAPABILITIES = re.compile(r"\b(?:what\s+(?:all\s+)?can\s+you\s+do|what\s+are\s+your\s+(?:capabilities|features)|help\s+me|who\s+are\s+you|introduce\s+yourself)\b", _F)
+_RE_STATUS     = re.compile(r"\b(?:what(?:'s|\s+is)\s+(?:the\s+)?status|system\s+status|pc\s+status|device\s+status|^status$)\b", _F)
+
+# Direct reminder parsing: "remind me to X in N minutes/hours" or "set a reminder in N minutes/hours to X"
+_RE_REMIND_IN_TO = re.compile(r"\b(?:set\s+(?:a\s+)?)?reminder\s+in\s+(\d+)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)\s+to\s+(.+?)[\.\?\!]*$", _F)
+_RE_REMIND_TO_IN = re.compile(r"\bremind\s+(?:me\s+)?to\s+(.+?)\s+in\s+(\d+)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)[\.\?\!]*$", _F)
 
 _RE_LOCK       = re.compile(r"\b(?:lock(?:\s+(?:the\s+)?(?:screen|pc|computer|system|machine))?|(?:screen|pc|computer)\s+lock)\b", _F)
 
 # ── System Info ───────────────────────────────────────────────────────────────
-_RE_TIME       = re.compile(r"\b(?:what(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?time|time\s+(?:now|please)|current\s+time|what\s+time\s+is\s+it)\b", _F)
-_RE_DATE       = re.compile(r"\b(?:what(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?date|today(?:'s\s+date)?|what\s+(?:day|date)\s+is\s+(?:it|today)|current\s+date)\b", _F)
-_RE_BATTERY    = re.compile(r"\b(?:battery(?:\s+(?:status|level|percent(?:age)?|life))?|how\s+much\s+(?:battery|charge)(?:\s+(?:do\s+i\s+have|is\s+left))?|charging\s+status|is\s+it\s+charging)\b", _F)
+_RE_TIME       = re.compile(r"\b(?:(?:tell\s+me\s+(?:the\s+)?)?(?:what(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?time|time\s+(?:now|please)|current\s+time|what\s+time\s+is\s+it)|(?:tell\s+me\s+(?:the\s+)?time)|^time$)\b", _F)
+_RE_DATE       = re.compile(r"\b(?:(?:tell\s+me\s+(?:the\s+)?)?(?:what(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?date|today(?:'s\s+date)?|what\s+(?:day|date)\s+is\s+(?:it|today)|current\s+date)|(?:tell\s+me\s+(?:the\s+)?date)|^date$)\b", _F)
+_RE_BATTERY    = re.compile(r"\b(?:battery(?:\s+(?:status|level|percent(?:age)?|life))?|how\s+much\s+(?:battery|charge)(?:\s+(?:do\s+i\s+have|is\s+left))?|charging\s+status|is\s+it\s+charging|^battery$)\b", _F)
 _RE_POWER      = re.compile(r"\b(?:power\s+status|(?:is\s+(?:it|the\s+(?:pc|laptop))\s+)?(?:plugged\s+in|charging|on\s+battery(?:\s+power)?))\b", _F)
 _RE_NETWORK    = re.compile(r"\b(?:(?:check\s+)?(?:network|internet|wifi|wi-?fi|connection)\s+status|(?:am\s+i|are\s+we)\s+(?:connected|online)|is\s+(?:the\s+)?(?:internet|network|wifi|wi-?fi)\s+(?:connected|working|on|up)|do\s+i\s+have\s+internet)\b", _F)
 _RE_VPN        = re.compile(r"\b(?:vpn\s+status|(?:is\s+(?:the\s+)?)?vpn\s+(?:on|off|connected|active|running)|check\s+vpn)\b", _F)
@@ -252,7 +258,7 @@ _MIN_WORDS     = r"(?:minimize|minimise|hide|send\s+to\s+taskbar)"
 _REST_WORDS    = r"(?:restore|maximize|maximise|bring\s+back|show)"
 
 # Suffix noise to strip from app names
-_APP_SUFFIX    = r"(?:\s+(?:app(?:lication)?|window|program|software|process|for\s+me|please|now))*\s*$"
+_APP_SUFFIX    = r"(?:\s+(?:app(?:lication)?|window|program|software|process|for\s+me|please|now))*[\.\?\!]*\s*$"
 
 _RE_CLOSE      = re.compile(rf"\b{_CLOSE_WORDS}\s+(?:the\s+)?(.+?){_APP_SUFFIX}", _F)
 _RE_MINIMIZE   = re.compile(rf"\b{_MIN_WORDS}\s+(?:the\s+)?(.+?){_APP_SUFFIX}", _F)
@@ -305,50 +311,60 @@ def route(text: str) -> Tuple[Optional[str], bool]:
     try:
         cleaned = text.strip()
         
-        # Split by conjunctions: "and", "then", "also", comma, semicolon, ampersand
-        delimiters = re.compile(r'\b(?:and|then|also)\b|[,;&]', re.IGNORECASE)
-        parts = [p.strip() for p in delimiters.split(cleaned) if p.strip()]
-        
-        if len(parts) <= 1:
-            return _route(cleaned)
-            
-        # Multi-command check: Dry-run check first to prevent partial execution side-effects
-        global _tools
-        real_tools = _get_tools()  # Force load if not already loaded
-        backed_up_tools = dict(_tools)
-        
-        # Build mock tools
-        mock_tools = {}
-        for k in backed_up_tools.keys():
-            if k == "get_volume" or k == "get_brightness":
-                mock_tools[k] = lambda *a, **kw: 50
+        # 1. Check for compound commands FIRST
+        # Shared action: "increase brightness and volume" or "decrease volume and brightness"
+        m_inc = re.match(r'^(increase|raise|turn up|boost)\s+(brightness|volume)\s+(?:and|also)\s+(brightness|volume)[\.\?\!]*$', cleaned, re.IGNORECASE)
+        if m_inc:
+            action, first, second = m_inc.group(1), m_inc.group(2), m_inc.group(3)
+            parts = [f"{action} {first}", f"{action} {second}"]
+        else:
+            m_dec = re.match(r'^(decrease|lower|turn down|reduce|drop|dim)\s+(brightness|volume)\s+(?:and|also)\s+(brightness|volume)[\.\?\!]*$', cleaned, re.IGNORECASE)
+            if m_dec:
+                action, first, second = m_dec.group(1), m_dec.group(2), m_dec.group(3)
+                parts = [f"{action} {first}", f"{action} {second}"]
             else:
-                mock_tools[k] = lambda *a, **kw: {"ok": True, "out": "OK"}
-                
-        # Swap tools to dry-run mocks
-        _tools = mock_tools
-        
-        all_matched = True
-        for part in parts:
-            _, matched = _route(part)
-            if not matched:
-                all_matched = False
-                break
-                
-        # Restore real tools
-        _tools = backed_up_tools
-        
-        if all_matched:
-            # Execute all parts for real
-            responses = []
-            for part in parts:
-                resp, matched = _route(part)
-                if matched and resp:
-                    responses.append(resp)
-            return " and ".join(responses), True
+                # Conjunction split
+                delimiters = re.compile(r'\b(?:and|then|also)\b|[,;&]', re.IGNORECASE)
+                parts = [p.strip().rstrip(".?!").strip() for p in delimiters.split(cleaned) if p.strip()]
+
+        if len(parts) > 1:
+            # Multi-command check: Dry-run check first to prevent partial execution side-effects
+            global _tools
+            real_tools = _get_tools()  # Force load if not already loaded
+            backed_up_tools = dict(_tools)
             
-        # Fall back to LLM for full text if any segment failed to match
-        return None, False
+            # Build mock tools
+            mock_tools = {}
+            for k in backed_up_tools.keys():
+                if k == "get_volume" or k == "get_brightness":
+                    mock_tools[k] = lambda *a, **kw: 50
+                else:
+                    mock_tools[k] = lambda *a, **kw: {"ok": True, "out": "OK"}
+                    
+            # Swap tools to dry-run mocks
+            _tools = mock_tools
+            
+            all_matched = True
+            for part in parts:
+                _, matched = _route(part)
+                if not matched:
+                    all_matched = False
+                    break
+                    
+            # Restore real tools
+            _tools = backed_up_tools
+            
+            if all_matched:
+                # Execute all parts for real
+                responses = []
+                for part in parts:
+                    resp, matched = _route(part)
+                    if matched and resp:
+                        responses.append(resp)
+                return " and ".join(responses), True
+
+        # 2. Check direct single-command match if not a multi-command or if multi-command didn't match all parts
+        return _route(cleaned)
     except Exception:
         traceback.print_exc()
         return None, False
@@ -488,6 +504,22 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
 
 
     # ── REMINDERS ─────────────────────────────────────────────────────────────
+    if m := _RE_REMIND_IN_TO.search(text):
+        num = m.group(1)
+        unit = m.group(2).lower()
+        action = m.group(3).strip()
+        time_str = f"in {num} {unit}"
+        t["add_reminder"](title=action, message=action, remind_time=time_str)
+        return f"Reminder set. I'll remind you in {num} {unit} to {action}.", True
+
+    if m := _RE_REMIND_TO_IN.search(text):
+        action = m.group(1).strip()
+        num = m.group(2)
+        unit = m.group(3).lower()
+        time_str = f"in {num} {unit}"
+        t["add_reminder"](title=action, message=action, remind_time=time_str)
+        return f"Reminder set. I'll remind you in {num} {unit} to {action}.", True
+
     if _RE_REMINDERS.search(text):
         raw = t["list_active_reminders"]()
         if not raw or "No active reminders" in str(raw):
@@ -498,7 +530,12 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
             clean = " ".join(lines[:3])
         return clean, True
 
-    # ── CANNED "WHAT CAN YOU DO" ──────────────────────────────────────────────
+    # ── CANNED "WHAT CAN YOU DO" / STATUS ────────────────────────────────────
+    if _RE_STATUS.search(text):
+        time_res = _extract_result(t["get_time"]())
+        batt_res = _extract_result(t["get_battery"]())
+        return f"{time_res} and {batt_res}", True
+
     if _RE_CAPABILITIES.search(text):
         return ("I am KYOMA, your physical AI desktop companion. "
                 "I can adjust volume and brightness, launch applications like Notepad, Calculator, and File Explorer, "

@@ -254,7 +254,8 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
                     {"role": "user", "content": search_prompt}
                 ],
                 keep_alive="1h",
-                options={"temperature": 0.2}
+                think=False,
+                options={"temperature": 0.2, "num_predict": 80}
             )
             t_llm_wall = time.perf_counter() - t_llm_start
             final_text = resp_search["message"].get("content", "").strip()
@@ -290,7 +291,8 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
             messages=memory.get_messages(system_prompt=system_prompt),
             tools=active_tools,
             keep_alive="1h",
-            options={"temperature": 0.2}
+            think=False,
+            options={"temperature": 0.2, "num_predict": 80}
         )
         t_call1_wall = time.perf_counter() - t_call1_start
     except Exception as tool_err:
@@ -301,7 +303,8 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
                 model=model_name,
                 messages=memory.get_messages(system_prompt=system_prompt),
                 keep_alive="1h",
-                options={"temperature": 0.2}
+                think=False,
+                options={"temperature": 0.2, "num_predict": 80}
             )
             t_call1_wall = time.perf_counter() - t_call1_start
         else:
@@ -311,13 +314,13 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
 
     # Metrics logging
     try:
-        c1_total_s = (getattr(resp, "total_duration", None) or 0) / 1e9
-        c1_load_s = (getattr(resp, "load_duration", None) or 0) / 1e9
-        c1_prompt_s = (getattr(resp, "prompt_eval_duration", None) or 0) / 1e9
-        c1_prompt_tok = getattr(resp, "prompt_eval_count", None) or 0
-        c1_eval_s = (getattr(resp, "eval_duration", None) or 0) / 1e9
-        c1_eval_tok = getattr(resp, "eval_count", None) or 0
-        c1_has_thinking = bool(getattr(msg, "thinking", None) or (isinstance(msg, dict) and msg.get("thinking")))
+        c1_total_s = (resp.get("total_duration") or 0) / 1e9
+        c1_load_s = (resp.get("load_duration") or 0) / 1e9
+        c1_prompt_s = (resp.get("prompt_eval_duration") or 0) / 1e9
+        c1_prompt_tok = resp.get("prompt_eval_count") or 0
+        c1_eval_s = (resp.get("eval_duration") or 0) / 1e9
+        c1_eval_tok = resp.get("eval_count") or 0
+        c1_has_thinking = bool(msg.get("thinking"))
         print(f"[KYOMA_TIMING] CALL_1 | wall={t_call1_wall:.3f}s | total={c1_total_s:.3f}s | load={c1_load_s:.3f}s | prompt_eval={c1_prompt_s:.3f}s ({c1_prompt_tok}tok) | eval={c1_eval_s:.3f}s ({c1_eval_tok}tok) | thinking_present={c1_has_thinking}")
     except Exception as timing_ex:
         pass
@@ -382,17 +385,23 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
         print(f"[KYOMA_TIMING] TOOL_EXEC | wall={t_tools_wall:.3f}s | count={len(msg['tool_calls'])}")
 
         # Optimization: Skip 2nd LLM call for clean user-readable tool results
-        if not has_search_evidence and len(executed_results) == 1:
-            func_name, direct_text, is_clean = executed_results[0]
-            if is_clean and direct_text:
-                clean_spoken = direct_text.strip()
-                if clean_spoken.startswith("{") and "out" in clean_spoken:
-                    clean_spoken = re.sub(r'^[^{]*\{.*?out[\'": ]+', '', clean_spoken).strip(" }'\"")
-                memory.add_assistant_message(text=clean_spoken)
-                t_total_e2e = time.perf_counter() - t_start
-                print(f"[KYOMA_TIMING] SHORTCUT_TTS | wall={t_total_e2e:.3f}s | text={clean_spoken[:50]!r}")
-                print(f"[KYOMA_TIMING] E2E_REQUEST | wall={t_total_e2e:.3f}s | path=tool_shortcut")
-                return {"ok": True, "text": clean_spoken}
+        if not has_search_evidence and executed_results:
+            all_clean = all(is_clean for _, _, is_clean in executed_results)
+            if all_clean:
+                clean_texts = []
+                for fname, dtext, _ in executed_results:
+                    txt = str(dtext).strip()
+                    if txt.startswith("{") and "out" in txt:
+                        txt = re.sub(r'^[^{]*\{.*?out[\'": ]+', '', txt).strip(" }'\"")
+                    if txt:
+                        clean_texts.append(txt)
+                if clean_texts:
+                    combined_spoken = " and ".join(clean_texts)
+                    memory.add_assistant_message(text=combined_spoken)
+                    t_total_e2e = time.perf_counter() - t_start
+                    print(f"[KYOMA_TIMING] MULTI_TOOL_SHORTCUT | wall={t_total_e2e:.3f}s | count={len(executed_results)}")
+                    print(f"[KYOMA_TIMING] E2E_REQUEST | wall={t_total_e2e:.3f}s | path=multi_tool_shortcut")
+                    return {"ok": True, "text": combined_spoken}
 
         # Second round: for search interpretation or multi-step results
         try:
@@ -411,27 +420,29 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
                         {"role": "user", "content": search_prompt}
                     ],
                     keep_alive="1h",
-                    options={"temperature": 0.2}
+                    think=False,
+                    options={"temperature": 0.2, "num_predict": 80}
                 )
             else:
                 resp2 = ollama.chat(
                     model=model_name,
                     messages=memory.get_messages(system_prompt=system_prompt),
                     keep_alive="1h",
-                    options={"temperature": 0.3}
+                    think=False,
+                    options={"temperature": 0.2, "num_predict": 80}
                 )
             t_call2_wall = time.perf_counter() - t_call2_start
             final_text = resp2["message"].get("content", "")
 
             try:
-                c2_total_s = (getattr(resp2, "total_duration", None) or 0) / 1e9
-                c2_load_s = (getattr(resp2, "load_duration", None) or 0) / 1e9
-                c2_prompt_s = (getattr(resp2, "prompt_eval_duration", None) or 0) / 1e9
-                c2_prompt_tok = getattr(resp2, "prompt_eval_count", None) or 0
-                c2_eval_s = (getattr(resp2, "eval_duration", None) or 0) / 1e9
-                c2_eval_tok = getattr(resp2, "eval_count", None) or 0
+                c2_total_s = (resp2.get("total_duration") or 0) / 1e9
+                c2_load_s = (resp2.get("load_duration") or 0) / 1e9
+                c2_prompt_s = (resp2.get("prompt_eval_duration") or 0) / 1e9
+                c2_prompt_tok = resp2.get("prompt_eval_count") or 0
+                c2_eval_s = (resp2.get("eval_duration") or 0) / 1e9
+                c2_eval_tok = resp2.get("eval_count") or 0
                 c2_msg = resp2["message"]
-                c2_has_thinking = bool(getattr(c2_msg, "thinking", None) or (isinstance(c2_msg, dict) and c2_msg.get("thinking")))
+                c2_has_thinking = bool(c2_msg.get("thinking"))
                 print(f"[KYOMA_TIMING] CALL_2 | wall={t_call2_wall:.3f}s | total={c2_total_s:.3f}s | load={c2_load_s:.3f}s | prompt_eval={c2_prompt_s:.3f}s ({c2_prompt_tok}tok) | eval={c2_eval_s:.3f}s ({c2_eval_tok}tok) | thinking_present={c2_has_thinking}")
             except Exception as timing_ex2:
                 pass
@@ -439,9 +450,22 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
             print(f"⚠️ Second-round chat failed: {chat_err}")
             final_text = ""
 
-        if not final_text or not final_text.strip():
+        # Fallback if 2nd LLM call returned empty or a generic greeting
+        greetings = ("hello", "hi!", "how can i assist", "how may i assist", "i am kyoma")
+        is_generic_greeting = any(final_text.lower().startswith(g) for g in greetings)
+        if not final_text or not final_text.strip() or is_generic_greeting:
             if executed_results:
-                final_text = executed_results[0][1]
+                clean_fallbacks = []
+                for _, rtxt, _ in executed_results:
+                    c = str(rtxt).strip()
+                    if c.startswith("{") and "out" in c:
+                        c = re.sub(r'^[^{]*\{.*?out[\'": ]+', '', c).strip(" }'\"")
+                    if c:
+                        clean_fallbacks.append(c)
+                if clean_fallbacks:
+                    final_text = " and ".join(clean_fallbacks)
+                else:
+                    final_text = executed_results[0][1]
             else:
                 final_text = "I have performed the requested task."
 
