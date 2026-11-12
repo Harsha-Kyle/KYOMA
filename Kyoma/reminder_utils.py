@@ -477,6 +477,12 @@ def cancel_reminder_by_title(title):
 # ----------------------
 # SCHEDULER
 # ----------------------
+# MISSED REMINDER POLICY:
+# When KYOMA starts, load_and_schedule_all() finds pending reminders whose time has passed.
+# These are fired as staggered "missed" notifications (15s apart) with a special toast.
+# If the user does not acknowledge within 60s, they are snoozed for 5 minutes.
+# One-time reminders are marked completed after acknowledgment.
+# Recurring reminders schedule their next occurrence.
 scheduler = BackgroundScheduler(daemon=True)
 
 def schedule_reminder(reminder, stagger_index=None):
@@ -539,34 +545,93 @@ start_scheduler()
 # ----------------------
 # HELPER
 # ----------------------
+def _format_natural_time(time_str: str) -> str:
+    """Convert an ISO/standard datetime string into natural speech like 'today at 2:30 PM'."""
+    try:
+        dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return time_str
+
+    now = datetime.now()
+    time_part = dt.strftime("%I:%M %p").lstrip("0")
+    if dt.date() == now.date():
+        return f"today at {time_part}"
+    elif dt.date() == (now + timedelta(days=1)).date():
+        return f"tomorrow at {time_part}"
+    else:
+        return f"on {dt.strftime('%B')} {dt.day} at {time_part}"
+
+
+def reset_demo_reminders() -> str:
+    """Reset the demo reminders database. Only allowed in demo mode and never touches production DB."""
+    try:
+        from demo_safety import is_demo_mode_active
+        if not is_demo_mode_active():
+            return "Demo reset is only available when demo mode is active."
+    except Exception:
+        return "Demo mode check failed."
+
+    demo_db = reminder_folder / "reminders_demo.db"
+    if os.path.exists(demo_db):
+        try:
+            conn = sqlite3.connect(demo_db)
+            c = conn.cursor()
+            c.execute("DELETE FROM reminders")
+            conn.commit()
+            conn.close()
+            log_event("🧹 [Demo Reset] Cleared all reminders from reminders_demo.db")
+            return "Demo reminders database has been reset."
+        except Exception as e:
+            return f"Error resetting demo database: {e}"
+    return "Demo database does not exist yet."
+
+
 def list_active_reminders():
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(get_db_path())
     cursor = conn.cursor()
 
     cursor.execute("""
         SELECT id, title, message, time, repeat_interval, status
         FROM reminders
-        WHERE status = 'pending'
+        WHERE status = 'pending' AND datetime(time) > datetime(?)
         ORDER BY datetime(time) ASC
-    """)
+    """, (now_str,))
 
     rows = cursor.fetchall()
     conn.close()
 
     if not rows:
-        return "No active reminders found."
+        return "You have no upcoming reminders scheduled."
 
-    lines = []
-    # Limit spoken reminder listings to three items and remove emoji
-    for row in rows[:3]:
-        rid, title, msg, time_str, repeat_interval, status = row
-        # Clean emojis from title for TTS clarity
-        clean_title = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf🎉🎂🔔]+', '', title).strip()
-        recurrence_text = f"(repeat: {repeat_interval})" if repeat_interval and repeat_interval != "one time" else ""
-        rec_str = f" {recurrence_text}" if recurrence_text else ""
-        lines.append(f"{clean_title} scheduled at {time_str}{rec_str}.")
+    total_count = len(rows)
 
-    return "Active reminders: " + " ".join(lines)
+    # Deduplicate identical titles while preserving order
+    seen_titles = {}
+    ordered_unique = []
+    for row in rows:
+        title = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf🎉🎂🔔]+', '', row[1]).strip()
+        time_nat = _format_natural_time(row[3])
+        if title not in seen_titles:
+            seen_titles[title] = 1
+            ordered_unique.append((title, time_nat))
+        else:
+            seen_titles[title] += 1
+
+    spoken_items = []
+    for title, time_nat in ordered_unique[:3]:
+        count = seen_titles[title]
+        dup_note = f" (and {count - 1} more)" if count > 1 else ""
+        spoken_items.append(f"{title}{dup_note} {time_nat}")
+
+    if len(spoken_items) == 1:
+        details = spoken_items[0]
+    elif len(spoken_items) == 2:
+        details = f"{spoken_items[0]}, and {spoken_items[1]}"
+    else:
+        details = ", ".join(spoken_items[:-1]) + f", and {spoken_items[-1]}"
+
+    return f"You have {total_count} upcoming reminder{'s' if total_count != 1 else ''}: {details}."
 
 
 
