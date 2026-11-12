@@ -1,4 +1,7 @@
 @echo off
+chcp 65001 >nul
+set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
 title KYOMA AI - Future Gadget Laboratory
 color 06
 
@@ -18,8 +21,26 @@ timeout /t 2 /nobreak >nul
 start http://localhost:5173
 
 echo [3/3] Starting Backend Server...
-cd /d %~dp0backend
-..\..\venv\Scripts\python.exe server.py
+start "KYOMA Backend" cmd /k "cd /d %~dp0backend && ..\..\venv\Scripts\python.exe server.py"
 
+echo.
+echo Waiting for KYOMA Backend to become healthy...
+:health_loop
+timeout /t 2 /nobreak >nul
+curl -s -f http://localhost:8000/health >nul 2>&1
+if errorlevel 1 (
+    echo ... waiting for backend initialization ...
+    goto health_loop
+)
+
+echo.
+echo ========================================================
+echo               *** KYOMA SYSTEM READY ***
+echo ========================================================
+echo Input Mode   : wake_word (Say "Hey Kyoma" or "Kyoma")
+echo Desktop UI   : http://localhost:5173
+echo API Health   : http://localhost:8000/health
+echo ========================================================
+echo.
 pause
 

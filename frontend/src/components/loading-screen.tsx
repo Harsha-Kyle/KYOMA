@@ -323,7 +323,7 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
 
             // Pre-load all primary assets simultaneously
             try {
-              const [settingsRes, sessionsRes, modelsRes, voicesRes, kokoroRes, live2dRes, vrmRes] =
+              const [settingsRes, sessionsRes, modelsRes, _voicesRes, _kokoroRes, _live2dRes, _vrmRes] =
                 await Promise.allSettled([
                   apiFetch("/api/settings"),
                   apiFetch("/api/chat/sessions"),

@@ -1,17 +1,75 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { SidebarProvider } from "@/components/ui/sidebar"
 import { AppSidebar } from "@/components/app-sidebar"
 import pageMapping from "@/constants/page-mapping"
+import { globalStateManager } from "@/lib/globalStateManager"
+import { chatManager } from "@/lib/chatManager"
 
 type PageKey = keyof typeof pageMapping
 
 function Mainpage() {
     const [currentPage, setCurrentPage] = useState<PageKey>("llm")
+    const [systemState, setSystemState] = useState<string>("IDLE")
+    const inputMode = "wake_word"
+    const [lastCommand, setLastCommand] = useState<string>("")
+    const [lastResponse, setLastResponse] = useState<string>("")
+
+    useEffect(() => {
+        const unsubLLM = globalStateManager.subscribe('isLLMThinking', (thinking) => {
+            if (thinking) setSystemState("THINKING");
+            else if (!globalStateManager.getState('isTTSPlaying')) setSystemState("IDLE");
+        });
+        const unsubTTS = globalStateManager.subscribe('isTTSPlaying', (playing) => {
+            if (playing) setSystemState("SPEAKING");
+            else if (!globalStateManager.getState('isLLMThinking')) setSystemState("IDLE");
+        });
+        const unsubRec = globalStateManager.subscribe('isVoiceRecording', (rec) => {
+            if (rec && !globalStateManager.getState('isTTSPlaying') && !globalStateManager.getState('isLLMThinking')) {
+                setSystemState("LISTENING");
+            }
+        });
+        const unsubChat = chatManager.subscribe((messages) => {
+            if (messages && messages.length > 0) {
+                const userMsgs = messages.filter((m) => m.role === 'user');
+                const asstMsgs = messages.filter((m) => m.role === 'assistant');
+                if (userMsgs.length > 0) setLastCommand(userMsgs[userMsgs.length - 1].content || "");
+                if (asstMsgs.length > 0) setLastResponse(asstMsgs[asstMsgs.length - 1].content || "");
+            }
+        });
+
+        return () => {
+            unsubLLM();
+            unsubTTS();
+            unsubRec();
+            unsubChat();
+        };
+    }, []);
 
     return (
         <SidebarProvider open={false}>
             <AppSidebar onItemClick={setCurrentPage} activePage={currentPage} />
             <div className="flex flex-col w-full h-screen">
+                {/* Demo status bar */}
+                <div className="bg-muted/40 border-b px-4 py-1.5 flex items-center justify-between text-xs text-muted-foreground z-10">
+                    <div className="flex items-center space-x-3">
+                        <span className="font-semibold text-foreground">KYOMA Status:</span>
+                        <span className="inline-flex items-center gap-1.5">
+                            <span className={`h-2 w-2 rounded-full ${
+                                systemState === "LISTENING" ? "bg-green-500 animate-pulse" :
+                                systemState === "THINKING" ? "bg-amber-500 animate-pulse" :
+                                systemState === "SPEAKING" ? "bg-blue-500 animate-pulse" : "bg-gray-400"
+                            }`} />
+                            <strong className="text-foreground">{systemState}</strong>
+                        </span>
+                        <span>Mode: <span className="font-mono text-foreground font-semibold">{inputMode}</span></span>
+                    </div>
+                    {(lastCommand || lastResponse) && (
+                        <div className="truncate max-w-xl text-right">
+                            {lastCommand && <span className="mr-2">Last: &ldquo;{lastCommand}&rdquo;</span>}
+                            {lastResponse && <span className="text-foreground font-medium">&rarr; &ldquo;{lastResponse.slice(0, 40)}...&rdquo;</span>}
+                        </div>
+                    )}
+                </div>
                 <main className="flex-1 relative">
                     {Object.entries(pageMapping).map(([key, { page: PageComponent }]) => {
                         const isActive = currentPage === key;
