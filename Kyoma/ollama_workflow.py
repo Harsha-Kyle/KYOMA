@@ -17,8 +17,8 @@ from search_evidence import search_web_evidence
 _SEARCH_INTENT_PATTERNS = [
     # Explicit "who is / who was" factual look-ups
     re.compile(r"^\bwho\s+(?:is|was|are|were)\b", re.IGNORECASE),
-    # "What is the current X" / "what's the current X"
-    re.compile(r"\bwhat(?:'s|\s+is)\s+the\s+current\b", re.IGNORECASE),
+    # "What is the current X" / "what's the current X" / "current X of Y"
+    re.compile(r"\b(?:what(?:'s|\s+is)\s+the\s+current|current\s+(?:prime\s+minister|president|ceo|status|leader|news))\b", re.IGNORECASE),
     # Explicit search commands
     re.compile(r"\b(?:search\s+for|look\s+up|look\s+it\s+up|google\s+(?:it|for))\b", re.IGNORECASE),
     # "latest X" / "recent X" / "news about X" — factual time-sensitive
