@@ -31,6 +31,7 @@ def _load_vad_config() -> dict:
         "vad_speech_threshold": 0.3,
         "input_mode": "always_listening",
         "wake_word_timeout": 6.0,
+        "whisper_initial_prompt": "",
     }
     try:
         base = os.path.dirname(__file__)
@@ -48,6 +49,8 @@ def _load_vad_config() -> dict:
                 defaults["input_mode"] = str(user_cfg["input_mode"]).lower().strip()
             if "wake_word_timeout" in user_cfg:
                 defaults["wake_word_timeout"] = float(user_cfg["wake_word_timeout"])
+            if "whisper_initial_prompt" in user_cfg:
+                defaults["whisper_initial_prompt"] = str(user_cfg["whisper_initial_prompt"]).strip()
     except Exception as e:
         logger.warning(f"[VAD] Could not load kyoma_config.json for VAD settings: {e}")
     return defaults
@@ -83,10 +86,12 @@ class VoiceInput:
         self._silence_wait_samples: int = int(self._vad_silence_duration * self.SAMPLING_RATE)
         self.input_mode: str = _vad_cfg.get("input_mode", "always_listening")
         self.wake_word_timeout: float = _vad_cfg.get("wake_word_timeout", 6.0)
+        self.whisper_initial_prompt: str = _vad_cfg.get("whisper_initial_prompt", "")
         self.system_state: str = "IDLE"  # IDLE | LISTENING | THINKING | SPEAKING
         self._wake_active_until: float = 0.0
         self.state_callback = None  # async def callback(state: str) -> None
         self.barge_in_callback = None  # callable to interrupt active TTS/speaking
+        self._last_state_broadcast = (None, 0.0)  # (state, timestamp) debounce guard
 
         logger.info(
             f"[VAD] silence_duration={self._vad_silence_duration:.3f}s "
@@ -277,8 +282,7 @@ class VoiceInput:
                         except Exception as _bie:
                             logger.debug(f"[VoiceInput] Barge-in callback error: {_bie}")
                     self.system_state = "LISTENING"
-                    if self.state_callback:
-                        asyncio.create_task(self.state_callback("LISTENING"))
+                    asyncio.create_task(self._safe_broadcast_state("LISTENING"))
 
                 async with self.processing_lock:
                     # Ignore utterances shorter than 0.4 seconds per spec
@@ -318,23 +322,20 @@ class VoiceInput:
                                     # Wake word and command in same utterance
                                     active_text = remainder
                                     self.system_state = "THINKING"
-                                    if self.state_callback:
-                                        asyncio.create_task(self.state_callback("THINKING"))
+                                    asyncio.create_task(self._safe_broadcast_state("THINKING"))
                                 else:
                                     # Wake word alone: open 6-second window, transition to LISTENING
                                     self._wake_active_until = now + self.wake_word_timeout
                                     self.system_state = "LISTENING"
                                     logger.info(f"[WakeWord] Wake word detected alone. Window open for {self.wake_word_timeout}s.")
-                                    if self.state_callback:
-                                        asyncio.create_task(self.state_callback("LISTENING"))
+                                    asyncio.create_task(self._safe_broadcast_state("LISTENING"))
                                     continue
                             elif now < self._wake_active_until:
                                 # Within open 6-second command window
                                 self._wake_active_until = 0.0
                                 active_text = transcribed_text
                                 self.system_state = "THINKING"
-                                if self.state_callback:
-                                    asyncio.create_task(self.state_callback("THINKING"))
+                                asyncio.create_task(self._safe_broadcast_state("THINKING"))
                             else:
                                 # Wake-word mode active but wake word not detected; ignore
                                 logger.debug(f"[WakeWord] Utterance ignored (no wake word, outside window): {transcribed_text!r}")
@@ -359,6 +360,22 @@ class VoiceInput:
                             if self.esp32_mode and self.esp32_pipeline_callback and len(clients) == 0:
                                 asyncio.create_task(self.esp32_pipeline_callback(active_text))
 
+    async def _safe_broadcast_state(self, state: str):
+        """Debounced state broadcast to prevent rapid UI toggling."""
+        if not self.state_callback:
+            return
+        import time
+        now = time.time()
+        last_state, last_time = self._last_state_broadcast
+        # Allow state change immediately, but debounce identical state re-broadcasts within 1.0s
+        if state == last_state and (now - last_time) < 1.0:
+            return
+        self._last_state_broadcast = (state, now)
+        try:
+            await self.state_callback(state)
+        except Exception as e:
+            logger.debug(f"[VoiceInput] State broadcast error: {e}")
+
     def process_speech(self, audio_data):
         with wave.open(self.MIC_OUTPUT_PATH, "wb") as wf:
             wf.setnchannels(1)
@@ -367,10 +384,11 @@ class VoiceInput:
             wf.writeframes((audio_data * 32768.0).astype(np.int16).tobytes())
 
         transcribed_text = ''
+        prompt = self.whisper_initial_prompt if self.whisper_initial_prompt else "Kyoma, hey Kyoma, okay Kyoma"
         segments, _ = self.whisper_model.transcribe(
             self.MIC_OUTPUT_PATH,
             language=self.input_language,
-            initial_prompt="Kyoma, hey Kyoma, okay Kyoma"
+            initial_prompt=prompt
         )
         for segment in segments:
             transcribed_text += segment.text

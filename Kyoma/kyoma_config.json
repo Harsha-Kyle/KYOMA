@@ -1,6 +1,8 @@
 {
     "ollama_model": "gemma4:e2b",
     "demo_mode": true,
+    "input_mode": "wake_word",
     "vad_silence_duration": 0.45,
-    "vad_speech_threshold": 0.3
+    "vad_speech_threshold": 0.3,
+    "whisper_initial_prompt": "KYOMA, Kyoma, brightness, volume, screenshot, reminder, battery, Notepad, Calculator"
 }
