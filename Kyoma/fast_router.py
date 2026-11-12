@@ -225,12 +225,16 @@ _RE_RESTART    = re.compile(r"\b(?:restart(?:\s+(?:track|song|music))?|replay(?:
 _RE_SCREENSHOT = re.compile(r"\b(?:(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?|grab\s+(?:a\s+)?)?(?:screenshot|screen\s*shot|ss)(?:\s+and\s+save\s+it\s+as\s+([a-zA-Z0-9_\-]+))?(?:\s+(?:now|please))?|screen(?:\s+)?shot|screen\s+capture|screengrab|capture\s+screen|grab\s+screen)\b", _F)
 # ── Reminders & Capabilities Patterns ─────────────────────────────────────────
 _RE_REMINDERS  = re.compile(r"\b(?:(?:list|show|view|check|read|get)(?:\s+all)?(?:\s+my)?\s+reminders?|reminders?\s+(?:list|status)|what\s+are\s+my\s+reminders?|do\s+i\s+have\s+any\s+reminders?)\b", _F)
-_RE_CAPABILITIES = re.compile(r"\b(?:what\s+(?:all\s+)?can\s+you\s+do|what\s+are\s+your\s+(?:capabilities|features)|help\s+me|who\s+are\s+you|introduce\s+yourself)\b", _F)
+_RE_WHO          = re.compile(r"\b(?:who\s+are\s+you|introduce\s+yourself)\b", _F)
+_RE_CAPABILITIES = re.compile(r"\b(?:what\s+(?:all\s+)?(?:can\s+you\s+do|you\s+can\s+do)|what\s+are\s+your\s+(?:capabilities|features)|help\s+me)\b", _F)
 _RE_STATUS     = re.compile(r"\b(?:what(?:'s|\s+is)\s+(?:the\s+)?status|system\s+status|pc\s+status|device\s+status|^status$)\b", _F)
 
+# Word numbers mapping for reminder intervals
+_WORD_TO_NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
 # Direct reminder parsing: "remind me to X in N minutes/hours" or "set a reminder in N minutes/hours to X"
-_RE_REMIND_IN_TO = re.compile(r"\b(?:set\s+(?:a\s+)?)?reminder\s+in\s+(\d+)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)\s+to\s+(.+?)[\.\?\!]*$", _F)
-_RE_REMIND_TO_IN = re.compile(r"\bremind\s+(?:me\s+)?to\s+(.+?)\s+in\s+(\d+)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)[\.\?\!]*$", _F)
+_RE_REMIND_IN_TO = re.compile(r"\b(?:set\s+(?:a\s+)?)?reminder\s+in\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)\s+to\s+(.+?)[\.\?\!]*$", _F)
+_RE_REMIND_TO_IN = re.compile(r"\bremind\s+(?:me\s+)?to\s+(.+?)\s+in\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)[\.\?\!]*$", _F)
 
 _RE_LOCK       = re.compile(r"\b(?:lock(?:\s+(?:the\s+)?(?:screen|pc|computer|system|machine))?|(?:screen|pc|computer)\s+lock)\b", _F)
 
@@ -293,6 +297,35 @@ def _is_plausible_name(name: str) -> bool:
     return True
 
 
+def _natural_join(items: list[str]) -> str:
+    """Join response strings with commas and 'and', lowering mid-sentence caps.
+
+    2 items:  "{A}, {B}."
+    3+ items: "{A}, {B}, and {C}."
+    Strips trailing periods from each item to avoid ". and" artifacts,
+    lowercases subsequent items to prevent mid-sentence capitals.
+    """
+    if not items:
+        return ""
+    if len(items) == 1:
+        s = items[0].rstrip(".")
+        return s + "."
+
+    # Strip trailing periods and lowercase subsequent items
+    cleaned = [items[0].rstrip(".!")]
+    for item in items[1:]:
+        s = item.rstrip(".!")
+        # Lowercase the first char if it's a capital (avoid mid-sentence caps)
+        if s and s[0].isupper():
+            s = s[0].lower() + s[1:]
+        cleaned.append(s)
+
+    if len(cleaned) == 2:
+        return f"{cleaned[0]}, {cleaned[1]}."
+    # 3+: "A, B, and C."
+    return ", ".join(cleaned[:-1]) + ", and " + cleaned[-1] + "."
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core routing logic
 # ─────────────────────────────────────────────────────────────────────────────
@@ -310,6 +343,8 @@ def route(text: str) -> Tuple[Optional[str], bool]:
         return None, False
     try:
         cleaned = text.strip()
+        # Strip wake phrase if present at the start: "Hey Kyoma, " or "Kyoma, "
+        cleaned = re.sub(r'^(?:hey\s+)?kyoma[\s,:\-]+', '', cleaned, flags=re.I).strip()
         
         # 1. Check for compound commands FIRST
         # Shared action: "increase brightness and volume" or "decrease volume and brightness"
@@ -361,7 +396,7 @@ def route(text: str) -> Tuple[Optional[str], bool]:
                     resp, matched = _route(part)
                     if matched and resp:
                         responses.append(resp)
-                return " and ".join(responses), True
+                return _natural_join(responses), True
 
         # 2. Check direct single-command match if not a multi-command or if multi-command didn't match all parts
         return _route(cleaned)
@@ -505,7 +540,8 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
 
     # ── REMINDERS ─────────────────────────────────────────────────────────────
     if m := _RE_REMIND_IN_TO.search(text):
-        num = m.group(1)
+        raw_num = m.group(1).lower()
+        num = str(_WORD_TO_NUM.get(raw_num, raw_num))
         unit = m.group(2).lower()
         action = m.group(3).strip()
         time_str = f"in {num} {unit}"
@@ -514,7 +550,8 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
 
     if m := _RE_REMIND_TO_IN.search(text):
         action = m.group(1).strip()
-        num = m.group(2)
+        raw_num = m.group(2).lower()
+        num = str(_WORD_TO_NUM.get(raw_num, raw_num))
         unit = m.group(3).lower()
         time_str = f"in {num} {unit}"
         t["add_reminder"](title=action, message=action, remind_time=time_str)
@@ -532,14 +569,22 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
 
     # ── CANNED "WHAT CAN YOU DO" / STATUS ────────────────────────────────────
     if _RE_STATUS.search(text):
-        time_res = _extract_result(t["get_time"]())
-        batt_res = _extract_result(t["get_battery"]())
-        return f"{time_res} and {batt_res}", True
+        time_raw = _extract_result(t["get_time"]())
+        batt_raw = _extract_result(t["get_battery"]())
+        # Clean phrases: 'The current time is 02:49:56 PM' -> '2:49 PM' or keep time portion
+        # 'Battery at 77% and charging.' -> 'battery is at 77% and charging.'
+        m_t = re.search(r'(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)', time_raw, re.I)
+        time_clean = m_t.group(1) if m_t else time_raw.replace("The current time is", "").strip()
+        batt_clean = re.sub(r'^battery\s+at\s+', '', batt_raw.strip(), flags=re.I).rstrip('.')
+        batt_clean = batt_clean.replace("%", " percent")
+        return f"It's {time_clean}, and the battery is at {batt_clean}.", True
+
+    if _RE_WHO.search(text):
+        return "I'm KYOMA, your AI desktop companion.", True
 
     if _RE_CAPABILITIES.search(text):
-        return ("I am KYOMA, your physical AI desktop companion. "
-                "I can adjust volume and brightness, launch applications like Notepad, Calculator, and File Explorer, "
-                "take screenshots, check your battery and system performance, manage reminders, and search the web."), True
+        return ("I control volume, brightness, apps, screenshots, "
+                "reminders, system info, and web search."), True
 
     if _RE_PERF.search(text):
         result = _extract_result(t["get_performance"]())

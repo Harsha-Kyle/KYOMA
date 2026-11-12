@@ -64,15 +64,23 @@ def sanitize_for_tts(text: str) -> str:
     # 5. Clean extra whitespace
     s = re.sub(r'\s+', ' ', s).strip()
 
-    # 6. Length limiting (~25 words for routine spoken confirmations)
+    # 6. Length limiting (maximum 25 words on every spoken response)
     words = s.split()
-    if len(words) > 35:
+    if len(words) > 25:
         sentences = re.split(r'(?<=[.!?])\s+', s)
-        if len(sentences) > 1 and len(sentences[0].split()) <= 25:
-            s = sentences[0]
-            if len((s + ' ' + sentences[1]).split()) <= 32:
-                s = s + ' ' + sentences[1]
-        elif len(words) > 30:
-            s = ' '.join(words[:25]) + '.'
+        acc = []
+        for sent in sentences:
+            if len(acc) + len(sent.split()) <= 25:
+                acc.extend(sent.split())
+            else:
+                break
+        if acc:
+            s = ' '.join(acc)
+            if not s.endswith(('.', '!', '?')):
+                s += '.'
+        else:
+            s = ' '.join(words[:25])
+            if not s.endswith(('.', '!', '?')):
+                s += '.'
 
     return s
