@@ -127,6 +127,7 @@ class VoiceInput:
             self.vad_model = None
         self.processing_lock = asyncio.Lock()
         self.is_muted = False
+        self._wake_window_task: asyncio.Task | None = None  # auto-close wake window on timeout
 
     def _reset_buffers(self):
         self.sentence_audio_buffer = []
@@ -211,9 +212,13 @@ class VoiceInput:
         )
 
     async def _process_audio(self, audio_np, clients):
-        if not self.running:
+        # Guard: drop stale coroutines that were queued before mute was set.
+        # The audio_callback already skips when is_muted, but coroutines that
+        # were already in-flight (run_coroutine_threadsafe) can still arrive
+        # here. Discard them so old frames cannot leak into the next utterance.
+        if not self.running or self.is_muted:
             return
-            
+
         self.tmp_audio_buffer.extend(audio_np)
 
         while len(self.tmp_audio_buffer) >= 512:
@@ -296,6 +301,12 @@ class VoiceInput:
                     audio_array = np.array(self.sentence_audio_buffer)
                     self.vad_iterator.reset_states()
                     self._reset_buffers()
+                    # Also drain the tmp_audio_buffer so stale pre-speech frames
+                    # from this utterance cannot bleed into the next detection cycle.
+                    # We keep at most PRE_SPEECH_SAMPLES worth of recent audio as a
+                    # natural lead-in, then clear the rest.
+                    if len(self.tmp_audio_buffer) > int(self.PRE_SPEECH_SAMPLES):
+                        self.tmp_audio_buffer = self.tmp_audio_buffer[-int(self.PRE_SPEECH_SAMPLES):]
                     
                     # Run Whisper in a thread so it doesn't block the event loop
                     loop = asyncio.get_event_loop()
@@ -303,7 +314,7 @@ class VoiceInput:
                         None, self.process_speech, audio_array
                     )
 
-                    if transcribed_text and transcribed_text not in self.whisper_filter_list:
+                    if transcribed_text:
                         # ── Wake Word & State Flow ─────────────────────────
                         active_text = transcribed_text
                         import time
@@ -329,10 +340,15 @@ class VoiceInput:
                                     self.system_state = "LISTENING"
                                     logger.info(f"[WakeWord] Wake word detected alone. Window open for {self.wake_word_timeout}s.")
                                     asyncio.create_task(self._safe_broadcast_state("LISTENING"))
+                                    self._cancel_wake_window()
+                                    self._wake_window_task = asyncio.create_task(
+                                        self._run_wake_window_timer(self.wake_word_timeout)
+                                    )
                                     continue
                             elif now < self._wake_active_until:
                                 # Within open 6-second command window
                                 self._wake_active_until = 0.0
+                                self._cancel_wake_window()
                                 active_text = transcribed_text
                                 self.system_state = "THINKING"
                                 asyncio.create_task(self._safe_broadcast_state("THINKING"))
@@ -360,6 +376,25 @@ class VoiceInput:
                             if self.esp32_mode and self.esp32_pipeline_callback and len(clients) == 0:
                                 asyncio.create_task(self.esp32_pipeline_callback(active_text))
 
+    def _cancel_wake_window(self):
+        """Cancel any pending wake-window expiry task."""
+        if self._wake_window_task and not self._wake_window_task.done():
+            self._wake_window_task.cancel()
+        self._wake_window_task = None
+
+    async def _run_wake_window_timer(self, timeout: float):
+        """Auto-close the wake-word command window after timeout seconds if no command arrives."""
+        try:
+            await asyncio.sleep(timeout)
+            # If window is still open (not consumed by a command), close it and return to IDLE
+            if self._wake_active_until > 0.0:
+                self._wake_active_until = 0.0
+                self.system_state = "IDLE"
+                logger.info("[WakeWord] Command window expired with no command — returning to IDLE.")
+                asyncio.create_task(self._safe_broadcast_state("IDLE"))
+        except asyncio.CancelledError:
+            pass  # Window was consumed by a command — normal path
+
     async def _safe_broadcast_state(self, state: str):
         """Debounced state broadcast to prevent rapid UI toggling."""
         if not self.state_callback:
@@ -383,7 +418,12 @@ class VoiceInput:
             wf.setframerate(16000)
             wf.writeframes((audio_data * 32768.0).astype(np.int16).tobytes())
 
-        transcribed_text = ''
+        transcribed_text = ""
+        # Collect per-segment confidence for hallucination rejection.
+        # faster-whisper exposes avg_logprob and no_speech_prob per segment.
+        all_avg_logprob: list = []
+        all_no_speech_prob: list = []
+
         prompt = self.whisper_initial_prompt if self.whisper_initial_prompt else "Kyoma, hey Kyoma, okay Kyoma"
         segments, _ = self.whisper_model.transcribe(
             self.MIC_OUTPUT_PATH,
@@ -392,16 +432,41 @@ class VoiceInput:
         )
         for segment in segments:
             transcribed_text += segment.text
+            # faster-whisper NamedTuple exposes avg_logprob and no_speech_prob
+            if hasattr(segment, "avg_logprob"):
+                all_avg_logprob.append(float(segment.avg_logprob))
+            if hasattr(segment, "no_speech_prob"):
+                all_no_speech_prob.append(float(segment.no_speech_prob))
 
         if not transcribed_text:
-            return
-            
-        import re
-        clean_text = re.sub(r'[^\w\s]', '', transcribed_text).strip().lower()
-        # If after stripping all non-alphanumeric chars nothing is left (e.g. ". . . . ." or "..."), drop it
+            return None
+
+        # Conservative hallucination thresholds (faster-whisper metadata).
+        # avg_logprob < -1.0: very low confidence (hallucinations typically -1.2 to -2.0)
+        # no_speech_prob > 0.6: Whisper itself thinks this segment has no real speech
+        if all_avg_logprob:
+            mean_logprob = sum(all_avg_logprob) / len(all_avg_logprob)
+            if mean_logprob < -1.0:
+                logger.info(
+                    f"[Whisper] Rejected low-confidence transcript "
+                    f"(avg_logprob={mean_logprob:.3f} < -1.0): {transcribed_text!r}"
+                )
+                return None
+        if all_no_speech_prob:
+            mean_no_speech = sum(all_no_speech_prob) / len(all_no_speech_prob)
+            if mean_no_speech > 0.6:
+                logger.info(
+                    f"[Whisper] Rejected no-speech transcript "
+                    f"(no_speech_prob={mean_no_speech:.3f} > 0.6): {transcribed_text!r}"
+                )
+                return None
+
+        import re as _re
+        clean_text = _re.sub(r"[^\w\s]", "", transcribed_text).strip().lower()
+        # Drop if only punctuation/noise remains
         if not clean_text or clean_text in self.whisper_filter_list:
-            return
-            
+            return None
+
         return transcribed_text.strip()
 
 
