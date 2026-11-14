@@ -201,16 +201,18 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
         # 3. Execute search in a thread with hard 6.0-second timeout
         search_result = None
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _executor:
+            _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
                 _future = _executor.submit(search_web_evidence, user_text.strip(), 3)
-                try:
-                    search_result = _future.result(timeout=6.0)
-                except concurrent.futures.TimeoutError:
-                    print("[KYOMA_SEARCH] Search timed out after 6.0s")
-                    search_result = None
-                except Exception as _se:
-                    print(f"[KYOMA_SEARCH] Search exception: {_se}")
-                    search_result = None
+                search_result = _future.result(timeout=6.0)
+            except concurrent.futures.TimeoutError:
+                print("[KYOMA_SEARCH] Search timed out after 6.0s")
+                search_result = None
+            except Exception as _se:
+                print(f"[KYOMA_SEARCH] Search exception: {_se}")
+                search_result = None
+            finally:
+                _executor.shutdown(wait=False, cancel_futures=True)
         except Exception as _pool_err:
             print(f"[KYOMA_SEARCH] ThreadPool error: {_pool_err}")
 
