@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import re
+import time
 import wave
 from fastapi import WebSocket
 import sounddevice as sd
@@ -9,6 +11,21 @@ import torch
 from faster_whisper import WhisperModel
 from silero_vad import load_silero_vad, VADIterator
 from ..lib.LAV_logger import logger
+
+# ---------------------------------------------------------------------------
+# Pre-compiled wake-word pattern (module-level to avoid re-compiling per chunk)
+# Covers common Whisper mis-transcriptions of "Kyoma": coma, koma, kioma, keoma
+# and possessive artifacts like "kyoma's".
+# ---------------------------------------------------------------------------
+WAKE_WORD_PATTERN = re.compile(
+    r"\b(?:hey|hi|ok|okay)\s+(?:kyoma|coma|koma|kioma|keoma)\b|"
+    r"\b(?:kyoma|kioma|keoma)(?:'s)?\b",
+    re.IGNORECASE,
+)
+
+# Timeout (seconds) for a single Whisper transcription before the watchdog
+# cancels it.
+_WHISPER_WATCHDOG_TIMEOUT = 10.0
 
 # ---------------------------------------------------------------------------
 # VAD configuration helpers
@@ -128,6 +145,7 @@ class VoiceInput:
         self.processing_lock = asyncio.Lock()
         self.is_muted = False
         self.transcription_in_flight = False  # Guard against overlapping transcription jobs
+        self._transcription_generation: int = 0  # Bumped on mute/unmute to discard stale Whisper results
         self._wake_window_task: asyncio.Task | None = None  # auto-close wake window on timeout
 
     def _reset_buffers(self):
@@ -143,6 +161,7 @@ class VoiceInput:
         """Immediately discard incoming audio and purge all buffers."""
         self.is_muted = True
         self._reset_buffers()
+        self._transcription_generation += 1  # invalidate any in-flight Whisper result
         self.transcription_in_flight = False
         if hasattr(self, 'vad_iterator') and self.vad_iterator:
             try:
@@ -154,6 +173,7 @@ class VoiceInput:
     def unmute(self):
         """Resume accepting audio and reset state cleanly."""
         self._reset_buffers()
+        self._transcription_generation += 1  # invalidate any in-flight Whisper result
         self.transcription_in_flight = False
         if hasattr(self, 'vad_iterator') and self.vad_iterator:
             try:
@@ -322,27 +342,47 @@ class VoiceInput:
                         self.tmp_audio_buffer.clear()
                     
                     self.transcription_in_flight = True
+                    # Capture generation BEFORE the Whisper call so we can
+                    # detect if mute()/unmute() fired while we were blocked.
+                    my_gen = self._transcription_generation
                     try:
-                        # Run Whisper in a thread so it doesn't block the event loop
+                        # Run Whisper in a thread with a watchdog timeout so a
+                        # stuck model cannot permanently block audio processing.
                         loop = asyncio.get_event_loop()
-                        transcribed_text = await loop.run_in_executor(
-                            None, self.process_speech, audio_array
-                        )
+                        try:
+                            transcribed_text = await asyncio.wait_for(
+                                loop.run_in_executor(
+                                    None, self.process_speech, audio_array
+                                ),
+                                timeout=_WHISPER_WATCHDOG_TIMEOUT,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                f"[STT] Whisper watchdog: transcription timed out "
+                                f"after {_WHISPER_WATCHDOG_TIMEOUT}s — discarding"
+                            )
+                            transcribed_text = None
+
+                        # ── Stale-result guard ─────────────────────────────
+                        # If mute() or unmute() bumped the generation while
+                        # Whisper was running, this result is stale — discard.
+                        if self._transcription_generation != my_gen:
+                            logger.info(
+                                "[STT] Discarding stale transcription "
+                                f"(gen {my_gen} → {self._transcription_generation})"
+                            )
+                            continue
 
                         if transcribed_text:
                             # ── Wake Word & State Flow ─────────────────────────
                             active_text = transcribed_text
-                            import time
                             now = time.time()
 
                             if self.input_mode == "wake_word":
-                                import re
-                                wake_pat = re.compile(
-                                    r"\b(?:hey|hi|ok|okay)\s+(?:kyoma|coma|koma|kioma)\b|\bkyoma\b",
-                                    re.IGNORECASE
-                                )
-                                m = wake_pat.search(transcribed_text)
+                                # Use pre-compiled module-level pattern
+                                m = WAKE_WORD_PATTERN.search(transcribed_text)
                                 if m:
+                                    logger.info(f"[WakeWord] Detected: {transcribed_text!r}")
                                     remainder = re.sub(r"^[,\.\?!;:\s\-]+", "", transcribed_text[m.end():]).strip()
                                     if remainder:
                                         # Wake word and command in same utterance -> accept command, enter THINKING, mute mic
@@ -351,7 +391,11 @@ class VoiceInput:
                                         self.mute()
                                         asyncio.create_task(self._safe_broadcast_state("THINKING"))
                                     else:
-                                        # Wake word alone: open 6-second window, transition to LISTENING
+                                        # Wake word alone: open command window, transition to LISTENING.
+                                        # Audio capture continues — new speech arriving during this
+                                        # window is NOT discarded (transcription_in_flight is reset
+                                        # in finally). The next completed utterance enters the
+                                        # "now < _wake_active_until" branch and is accepted as a command.
                                         self._wake_active_until = now + self.wake_word_timeout
                                         self.system_state = "LISTENING"
                                         logger.info(f"[WakeWord] Wake word detected alone. Window open for {self.wake_word_timeout}s.")
@@ -382,6 +426,11 @@ class VoiceInput:
                                 # In PTT mode, standard background mic capture is bypassed unless triggered
                                 pass
 
+                            # Duplicate guard: reject the exact same text as the last accepted
+                            # utterance. This prevents double-processing when VAD fires twice
+                            # on the same speech, but does NOT prevent re-issuing a command
+                            # after a different command in between (by design — the user may
+                            # genuinely repeat a command).
                             if active_text != self.last_transcription:
                                 self.last_transcription = active_text
                                 logger.info(f"[STT] Transcribed: {active_text}")
@@ -448,7 +497,7 @@ class VoiceInput:
         all_avg_logprob: list = []
         all_no_speech_prob: list = []
 
-        prompt = self.whisper_initial_prompt if self.whisper_initial_prompt else "Kyoma, hey Kyoma, okay Kyoma"
+        prompt = self.whisper_initial_prompt if self.whisper_initial_prompt else "Kyoma"
         segments, _ = self.whisper_model.transcribe(
             self.MIC_OUTPUT_PATH,
             language=self.input_language,
@@ -489,6 +538,12 @@ class VoiceInput:
         clean_text = _re.sub(r"[^\w\s]", "", transcribed_text).strip().lower()
         # Drop if only punctuation/noise remains
         if not clean_text or clean_text in self.whisper_filter_list:
+            return None
+
+        # Reject obvious repeated-word noise (e.g. "No, no, no, no")
+        words_only = clean_text.split()
+        if len(words_only) >= 3 and len(set(words_only)) == 1:
+            logger.info(f"[Whisper] Rejected repeated-word noise: {transcribed_text!r}")
             return None
 
         return transcribed_text.strip()
