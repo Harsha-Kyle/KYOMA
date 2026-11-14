@@ -358,6 +358,42 @@ async def _on_startup():
 
     asyncio.create_task(_async_warmup())
 
+    # ── Microphone recovery watchdog ──────────────────────────────────────
+    # Failsafe: if the mic stays muted for >45s without an active THINKING
+    # or SPEAKING state, something went wrong — recover automatically.
+    async def _mic_recovery_watchdog():
+        _stuck_since = None
+        while True:
+            await asyncio.sleep(5)
+            try:
+                if not voice_input.is_muted:
+                    _stuck_since = None
+                    continue
+                # Don't recover during legitimate active states
+                if voice_input.system_state in ("THINKING", "SPEAKING"):
+                    _stuck_since = None
+                    continue
+                if _stuck_since is None:
+                    _stuck_since = time.time()
+                elif time.time() - _stuck_since > 45:
+                    logger.warning(
+                        "[MicRecovery] Microphone stuck muted for >45s "
+                        "without active state. Recovering."
+                    )
+                    voice_input.unmute()
+                    # Restore appropriate state based on input mode
+                    if voice_input.input_mode == "always_listening":
+                        voice_input.system_state = "LISTENING"
+                    else:
+                        voice_input.system_state = "IDLE"
+                    await broadcast_state_all(voice_input.system_state)
+                    _stuck_since = None
+            except Exception as _wd_err:
+                logger.debug(f"[MicRecovery] Watchdog error: {_wd_err}")
+                _stuck_since = None
+
+    asyncio.create_task(_mic_recovery_watchdog())
+
 # *******************************
 # WebUI
 # *******************************

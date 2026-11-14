@@ -27,7 +27,7 @@ echo.
 echo Waiting for KYOMA Backend to become healthy...
 :health_loop
 timeout /t 2 /nobreak >nul
-curl -s -f http://localhost:8000/health >nul 2>&1
+curl -s -f http://localhost:8000/api/status >nul 2>&1
 if errorlevel 1 (
     echo ... waiting for backend initialization ...
     goto health_loop
@@ -40,6 +40,7 @@ echo ========================================================
 echo Input Mode   : wake_word (Say "Hey Kyoma" or "Kyoma")
 echo Desktop UI   : http://localhost:5173
 echo API Health   : http://localhost:8000/health
+echo NOTE: Gemma model warms up in background (first query may take a few extra seconds)
 echo ========================================================
 echo.
 pause
