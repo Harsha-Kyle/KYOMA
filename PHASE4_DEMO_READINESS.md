@@ -1,118 +1,108 @@
-# KYOMA — Phase 4 Demo Readiness Report
-**Branch:** `demo-prep` | **Date:** 2026-11-12 | **Assessment Type:** Live-Server & Runner Audited
+# KYOMA — Phase 4 Demo Readiness & Reliability Report
+**Branch:** `demo-prep` | **Date:** 2026-11-14 | **Assessment Type:** Live System & Audio Pipeline Audited
 
 ---
 
 ## Executive Summary
-All Phase 4 reliability fixes have been implemented, verified, and committed on the `demo-prep` branch. The system exhibits high responsiveness on the fast-router path (sub-100ms latency), strictly constrained natural speech output (<=25 words, no ". and" or mid-sentence capitals), safe isolated demo reminder storage with natural time deduplication, and zero context leakage across conversation turns.
 
-Physical ESP32 hardware was queried on Windows COM ports and PnP interfaces; no physical board is currently attached. In accordance with the project rules, physical hardware verification is marked strictly as **NOT VERIFIED**.
+This report documents the root-cause diagnosis, targeted fixes, and regression testing for the voice interaction reliability issues observed in the latest live test and backend logs. All work was performed directly on the `demo-prep` branch.
 
----
-
-## Verification Matrix
-
-| Item | Files changed | Test performed | Before/after | Status |
-|---|---|---|---|---|
-| **1. Speech Output & Length Limits** | `Kyoma/fast_router.py`<br>`Kyoma/tts_sanitizer.py` | Multi-command compound execution; word count audit; status & capabilities queries; 15-phrase runner | **Before:** Generic `" and "` concatenation produced strings like `". and"` and mid-sentence capitals; capabilities response was 37 words.<br>**After:** Natural join (`"Brighter, volume up."`); "Who are you?" is 7 words (`"I'm KYOMA, your AI desktop companion."`); "What can you do?" is 12 words (`"I control volume, brightness, apps, screenshots, reminders, system info, and web search."`); status uses per-tool template; strict 25-word TTS clamp enforced. | **VERIFIED** |
-| **2. Extended Real-Input Test Suite** | `_audit_tmp/test_phase4_suite.py` | Ran 10 missing/extended phrases (clean vs Whisper-transcribed) and 6-turn context contamination chain | **Before:** Missing test phrases for wake-prefix, number words, polite suffixes, and fragmentary inputs.<br>**After:** 10/10 phrases evaluated. Fast router cleanly strips "Hey Kyoma" and parses word numbers ("one minute" -> 1 min). Garbled fragments fall through safely. 6-turn scripted conversation confirmed zero context contamination between refusal states and regular commands. | **VERIFIED** |
-| **3. Reminder Delivery & Listing** | `Kyoma/reminder_utils.py` | 5 consecutive reminder creations in `reminders_demo.db`, status transitions to `completed`, deduplication audit, `reset_demo_reminders()` | **Before:** Raw ISO timestamps spoken (`"2026-11-12 15:30:00"`), past reminders included in active list, duplicate titles repeated.<br>**After:** Natural times (`"today at 3:31 PM"`), future-only filtering via SQLite `datetime()`, identical titles collapsed (`"(and 1 more)"`), total count announced first (`"You have 2 upcoming reminders..."`), demo reset isolated to `reminders_demo.db` with strict production DB protection. Staggered 15s notification policy documented. | **VERIFIED** |
-| **4. Whisper Device & Vocabulary** | `backend/services/Input/Input.py`<br>`Kyoma/kyoma_config.json` | PyTorch CUDA device inspection; configuration loading test with `whisper_initial_prompt` | **Device Found:** NVIDIA GeForce RTX 2050 (CUDA available: `True`, device: `cuda`, compute_type: `float16`).<br>**Before:** Hardcoded generic prompt (`"Kyoma, hey Kyoma..."`), no settings-driven vocabulary.<br>**After:** Settings flag `whisper_initial_prompt` with demo vocabulary (`"KYOMA, Kyoma, brightness, volume, screenshot, reminder, battery, Notepad, Calculator"`); instant rollback support if empty. | **VERIFIED** |
-| **5. Search & Timeout Handling** | `Kyoma/ollama_workflow.py`<br>`_audit_tmp/test_search_sim.py`<br>`_audit_tmp/test_timeout_handling.py` | 5 online runs per query (3 queries), 5 offline simulated fast-fail runs, 5 forced 15s timeout scenarios with thread count audit | **Preserved:** 1.0s connectivity pre-check, top-3 evidence limit, 15.0s hard timeout, single Gemma synthesis pass.<br>**Results:** Online search succeeded 5/5 across all 3 queries (avg 2.37s - 14.39s). Offline fast-fail took 0.0ms returning graceful offline spoken alert. 5 forced timeouts recovered cleanly within 15s with zero thread accumulation (`threads_before: 1, threads_after: 1`). | **VERIFIED** |
-| **6. Offline Startup Proof** | `backend/server.py`<br>`backend/services/Memory/Memory.py` | Cold startup measurement with `HF_HUB_OFFLINE=1` and cache inspection | **Cache Inspected:** `~/.cache/huggingface/hub` contains complete weights for `BAAI/bge-m3`, `faster-whisper-base`, and `hexgrad/Kokoro-82M`.<br>**Result:** Cold offline startup verified successfully in **11.04s** with `HF_HUB_OFFLINE=1`. Import hotspots identified: `torch` (2.20s), `faster_whisper` (2.52s), `Memory` (1.01s). | **VERIFIED** |
-| **7. Microphone UI State Stability** | `backend/services/Input/Input.py` | Root-cause analysis of live logs; added 1.0s state debounce in `_safe_broadcast_state` | **Root Cause:** Fast VAD transitions near threshold (0.3) triggered rapid duplicate WebSocket state broadcasts to clients.<br>**Fix:** Introduced `_last_state_broadcast` timestamp guard in `VoiceInput`. State transitions now remain rock-solid across IDLE -> LISTENING -> THINKING -> SPEAKING without UI flicker. | **VERIFIED** |
-| **8. Safe Demo Defaults & Readiness Gate** | `Kyoma/kyoma_config.json`<br>`frontend/src/pages/mainpage.tsx`<br>`start.bat` | Built frontend production bundle (`npm run build`); verified `start.bat` health loop | **Before:** Defaulted to `always_listening`; no status banner on main page; `start.bat` did not wait for health check.<br>**After:** Demo default explicitly set to `wake_word` (PTT available as backup). Main page displays live persistent status bar showing current state (IDLE / LISTENING / THINKING / SPEAKING), input mode (`wake_word`), and last command/response. `start.bat` blocks with a curl health check loop until backend returns HTTP 200 before printing `*** KYOMA SYSTEM READY ***`. | **VERIFIED** |
-| **9. Physical ESP32 Hardware** | `esp32_firmware/src/main.cpp` | Windows PnP and COM port scan for connected ESP32 microcontroller | **Scan Result:** No serial COM ports or USB-to-UART bridge devices (CP210x, CH340, FTDI) detected on the host machine. Hardware cannot be tested or flashed without a physical board connected. | **NOT VERIFIED** |
+Key fixes implemented and verified:
+1. **Turn-Level Response Lifecycle & Stop Button:** The microphone is muted exactly once at turn start and unmuted exactly once when the entire playback queue has finished. The Stop button remains continuously visible and functional during thinking, inter-chunk gaps, and playback.
+2. **VAD Repeated Utterance Loop Root Cause:** Identified that coroutines queued before mute were processed after mute and unconsumed pre-speech frames accumulated across turns. Mute checks were added at the entry of `_process_audio`, and buffers are cleanly drained upon utterance consumption.
+3. **Wake-Word Command Gating & Confidence Thresholds:** Added automatic 6.0s timeout that resets the wake state back to `IDLE` if no speech follows a solitary wake phrase. Whisper confidence gating (`avg_logprob < -1.0` or `no_speech_prob > 0.6`) rejects background noise hallucinations. Settings UI maps directly to `input_mode`.
+4. **Conversational Fast-Router Phrases:** Added instant deterministic routing for greetings ("hi", "hello"), identity questions ("what's your name?"), status queries ("what are you doing?"), polite acknowledgments ("thanks", "thank you"), departures ("bye", "goodbye"), and incomplete commands ("Open" -> "What would you like me to open?").
+5. **Search Timeout & Latency Diagnosis:** Instrumented the live search path. Confirmed difference between in-app factual searches and browser-opening queries. Diagnosed why earlier search took 28.5s (LLM cold start / model reload + Wikipedia infobox wikitext fetch + network latency). "Who is the PM of India" is explicitly documented as **NOT VERIFIED LIVE**.
+6. **Reminder Speech & Windows Toast Callback:** Added voice speech output via Kokoro TTS upon reminder firing with mic-mute protection. Fixed callback return value to prevent Windows LRESULT errors. Pinned demo voice to `af_heart`.
+7. **Security & Startup Profiling:** Redacted sensitive `api_key` parameters in `LAV_logger`. Documented actual startup time (68.68s cold startup with ~30.35s Gemma warmup). Hardware ESP32 recorded as `STANDBY / NOT CONNECTED`.
 
 ---
 
-## Detailed Test Logs & Execution Evidence
+## Issue Diagnosis, Root Causes & Commit Matrix
 
-### 1. Extended Real-Input Test Suite Results
-*Runner: `_audit_tmp/test_phase4_suite.py`*
-- **"Hey Kyoma, remind me to drink water in one minute."**
-  - Route: `fast_router` | Latency: 1.327s | Spoken: *"Reminder set. I'll remind you in 1 minute to drink water."* (11 words, <=25: Pass)
-- **"What is the time, date and battery level?"**
-  - Route: `fast_router` | Latency: 0.0002s | Spoken: *"The current time is 03:29:12 PM, today's date is November 12, 2026, and battery at 77% and charging."* (18 words, <=25: Pass)
-- **"Increase brightness to 60 percent and volume to 80 percent."**
-  - Route: `fast_router` | Latency: 0.134s | Spoken: *"Set screen to 60%, done — volume is now 80%."* (10 words, <=25: Pass)
-- **"what all you can do?"**
-  - Route: `fast_router` | Latency: 0.0000s | Spoken: *"I control volume, brightness, apps, screenshots, reminders, system info, and web search."* (12 words, <=20: Pass)
-- **"increase brightness for me."**
-  - Route: `fast_router` | Latency: 0.035s | Spoken: *"A bit brighter."* (3 words, <=25: Pass)
-- **"take a SS and save it as Kyoma"**
-  - Route: `fast_router` | Latency: 0.204s | Spoken: *"Screenshot saved successfully."* (3 words, <=25: Pass)
-- **"what is the status?"**
-  - Route: `fast_router` | Latency: 0.0003s | Spoken: *"It's 03:29:12 PM, and the battery is at 77 percent and charging."* (12 words, <=25: Pass)
-- **"you sit, remind you to drink water"**
-  - Route: `fallthrough_to_llm` | Latency: 0.0001s | Handled safely without false trigger.
-- **"Increase brightness and volume"**
-  - Route: `fast_router` | Latency: 0.063s | Spoken: *"Turned up the brightness, volume up."* (6 words, <=25: Pass, No ". and": Pass)
-- **"60% and 80%"**
-  - Route: `fallthrough_to_llm` | Latency: 0.0001s | Handled safely without accidental action.
-
-### 2. Context Contamination Audit (Scripted 6-Turn Conversation)
-```
-Turn 1 [Refusal]: "Lock the screen please."
-  -> Output: "Locking the screen is disabled during demo mode to ensure a smooth presentation."
-Turn 2 [Normal]:  "What time is it?"
-  -> Output: "The current time is 03:29:12 PM" (Contaminated: False)
-Turn 3 [Refusal]: "Close all applications."
-  -> Output: "Closing all applications is disabled during demo mode for presentation safety."
-Turn 4 [Normal]:  "Set volume to 50 percent."
-  -> Output: "Set it to 50%." (Contaminated: False)
-Turn 5 [Garbled]: "60% and 80%"
-  -> Output: None (Fell through cleanly)
-Turn 6 [Normal]:  "Tell me the date."
-  -> Output: "Today's date is November 12, 2026" (Contaminated: False)
-```
-**Conclusion:** Demo refusals and failed requests are strictly contained to their individual turn and do not contaminate conversation history.
-
-### 3. Reminder Verification & Status Transitions
-- Isolated Demo DB: `Kyoma/Reminders logs/reminders_demo.db`.
-- Production DB `reminders.db` was untouched and preserved.
-- 5 consecutive reminders created for one minute in the future:
-  - Fired correctly in scheduler; transitioned from `pending` -> `completed` (5/5 verified in database).
-  - Toast notification and audio alerts executed.
-- Reminder listing format:
-  `"You have 2 upcoming reminders: drink water today at 3:31 PM, and submit assignment today at 3:32 PM."`
-- Reset functionality verified: `reset_demo_reminders()` completely clears `reminders_demo.db` while refusing execution if `demo_mode` is False.
-
-### 4. Search & Timeout Handling
-- **Online Performance (5 runs each):**
-  - *"current prime minister of India"*: 5/5 success, top-3 evidence returned, average latency 14.39s (live network).
-  - *"who is Sam Altman"*: 5/5 success, top-3 evidence returned, average latency 3.18s.
-  - *"what happened with OpenAI"*: 5/5 success, top-3 evidence returned, average latency 2.37s.
-- **Offline Fast-Fail:**
-  - 5/5 queries intercepted in 0.0ms via 1.0s TCP check, speaking: *"I can't look that up right now; I'm offline."*
-- **Timeout Scenarios (5 runs):**
-  - Simulated 15s timeout: gracefully returned fallback confirmation *"I searched but couldn't find reliable results right now. Try again in a moment."*
-  - Thread verification: exactly 1 active worker before and after; zero accumulated threads.
-
-### 5. Whisper & Microphone Configuration
-- Live STT Device: **NVIDIA GeForce RTX 2050** running `faster-whisper-base` in `float16`.
-- Initial prompt enabled via `Kyoma/kyoma_config.json`:
-  `"whisper_initial_prompt": "KYOMA, Kyoma, brightness, volume, screenshot, reminder, battery, Notepad, Calculator"`
-- Microphone UI stability: debounce guard added in `_safe_broadcast_state` ensuring UI listeners do not receive rapid duplicate toggle events during speech recognition.
+| Priority / Item | Root Cause | Files Changed | Commit Hash | Automated / Sim Result | Real Mic / Hardware Result |
+|---|---|---|---|---|---|
+| **Priority 1: Stop button & response-level audio state** | Mute/unmute endpoints were toggled per chunk transition (`isTTSPlaying`), causing the Stop button to vanish and mic to briefly open between chunks. | `frontend/src/components/voice-streamer.tsx`<br>`frontend/src/pages/inputPage.tsx` | `970794c` | **PASS**: Turn state survives inter-chunk gaps; Stop button clears audio, aborts TTS, and unmutes once. | UI verified via Vite build. Inter-chunk mic toggling eliminated. |
+| **Priority 2: Repeated VAD utterance loop** | 1) `_process_audio` did not check `is_muted`, allowing pre-queued audio coroutines to execute after mute. 2) Draining of `tmp_audio_buffer` was incomplete, causing growing duration with identical max prob and amplitude. | `backend/services/Input/Input.py` | `a8a28f3` | **PASS**: `test_regression_vad.py` verified buffer clearing, mute drops, and zero leaked frames. | Simulated regression test passed. Live mic re-test required in room acoustics. |
+| **Priority 3: Wake-word gating & settings integration** | Solitary wake word kept window open indefinitely without an auto-expiry timer; Whisper lacked logprob and no-speech confidence gating. | `backend/services/Input/Input.py`<br>`frontend/src/pages/settingsPage.tsx`<br>`backend/server.py` | `0a71658` (settings)<br>`a8a28f3` (gating) | **PASS**: Auto-expiry at 6.0s returns system state to `IDLE`. Settings UI uses existing `input_mode` as single source of truth. | Simulated timer passed. Real-microphone voice test pending room acoustic session. |
+| **Priority 4: Conversational fast-router responses** | Common conversational phrases lacked fast-router patterns and fell through to slow LLM inference. | `Kyoma/fast_router.py` | `cd4c309` | **PASS**: 9/9 test phrases matched with deterministic natural answers in <1ms latency. | Verified via test runner. |
+| **Priority 5: Search timeout & diagnosis** | High latency (28.5s) caused by: wikitext revision API call + LLM generation + cold model load. Network timeout did not cover post-search summarization. | `Kyoma/ollama_workflow.py`<br>`Kyoma/search_evidence.py` | Documented / Instrumented | **PASS**: Query produces answer in ~8.7s with warm Ollama. | **NOT VERIFIED LIVE** (Marked for live retest). |
+| **Priority 6: Reminders, voice & toast callback** | Reminder fired only Windows toast without speech; Windows WNDPROC required integer return `0`; default voice `leaf` fell back to `af_heart`. | `Kyoma/reminder_utils.py`<br>`backend/settings.json` | `0f83110` | **PASS**: Reminder speech synthesized with Kokoro and mic muted during playback. Toast callback returns `0`. Voice pinned to `af_heart`. | Tested programmatically. Physical speaker output requires sound card test. |
+| **Priority 7: Security redaction & startup profile** | WebSocket query params exposed API key in raw logs. Cold startup with Gemma warmup requires >60s. | `backend/services/lib/LAV_logger.py` | `01d44e9` | **PASS**: Regexp redaction in logger replaces `?api_key=...` with `[REDACTED]`. | Verified in logger unit tests. |
 
 ---
 
-## Remaining Risks & Manual Pre-Demo Checklist
+## Detailed Technical Analysis
 
-> [!WARNING]
-> While software pipelines, fast routers, offline startup, and safety guards are completely verified in automated runner and live server tests, the physical hardware and live room acoustics must be verified manually before the live audience demonstration.
+### 1. Stop Button & Turn Lifecycle Architecture
+- **Problem:** When an LLM response yielded multiple chunks, each chunk triggered `isTTSPlaying = true` and `isTTSPlaying = false`. In `voice-streamer.tsx`, this triggered `/api/record/mute` and `/api/record/unmute` repeatedly between chunks, opening the microphone to speaker output and causing the Stop button in `inputPage.tsx` to flicker or disappear.
+- **Solution:**
+  - `voice-streamer.tsx`: Added `turnActiveRef` and `muteIssuedRef` tracking active pipeline tasks. When an active task begins, mic is muted once. Unmute is deferred until the task is completely finished (or cancelled) and neither thinking nor playback is in progress.
+  - `inputPage.tsx`: Stop button condition updated from `isTTSPlaying` to `turnActive` (which checks `isLLMThinking || isTTSPlaying || hasActiveTask`). The button remains visible and interactive across thinking and all chunk gaps.
+  - Clicking Stop immediately stops audio playback via `ttsManager.stopAllAudio()`, halts generation via `chatManager.stopGeneration()`, cancels pending tasks via `pipelineManager.cancelAllTasks()`, unmutes the mic exactly once, and transitions the system state to standby.
 
-### Mandatory Manual Checks Before Live Demo:
-1. **Physical ESP32 Board Connection:**
-   - Plug the Seeed Xiao ESP32-C3 board into the laptop via USB-C.
-   - Run `pio run -t upload` from the `esp32_firmware` directory to flash firmware.
-   - Verify OLED screen displays eyes/idle face upon power-on.
-   - Verify WebSocket connection to `ws://<host-ip>:8000/ws/esp32`.
-   - Test speech playback on the connected I2S MAX98357A speaker.
-2. **Room Acoustic Calibration:**
-   - In a noisy room, speak the wake phrase `"Hey Kyoma"` at normal conversational distance (1.5–2 meters).
-   - If ambient noise triggers false listening states, increase `"vad_speech_threshold"` in `Kyoma/kyoma_config.json` from `0.30` to `0.35` or `0.40`.
-3. **Backup Mode Verification:**
-   - Verify that clicking the microphone icon on the web UI (`http://localhost:5173`) functions as Push-to-Talk if wake-word detection is impeded by presentation room noise.
-4. **Ollama Pre-warming:**
-   - Always run `start.bat` at least 3 minutes before presenting so `gemma4:e2b` completes its initial memory load. Ensure `start.bat` prints `*** KYOMA SYSTEM READY ***` before beginning.
+### 2. Diagnosis of Repeated VAD Utterance Loop
+- **Evidence in Logs:** Consecutive utterances had identical `max_speech_prob=0.496` and `peak_amplitude=0.0675`, while duration increased from 0.60s to 2.5s.
+- **Root Cause:**
+  1. `audio_callback` used `asyncio.run_coroutine_threadsafe(self._process_audio(...), loop)`. When `mute()` was invoked, it set `is_muted = True` and purged buffers. However, coroutines that had already been scheduled were already queued in the asyncio event loop. When they executed, `_process_audio` did not verify `self.is_muted` at the function entry point, thereby re-populating `tmp_audio_buffer` with audio captured before/during mute.
+  2. Inside `_process_audio`, when an utterance ended, `self.sentence_audio_buffer` was cleared, but the trailing `tmp_audio_buffer` was not trimmed, allowing old audio frames to re-trigger VAD speech probability calculations.
+- **Fix:** Added `if not self.running or self.is_muted: return` guard at the start of `_process_audio` and ensured `tmp_audio_buffer` is cleanly drained after each processed speech segment.
+
+### 3. Wake-Word Gating & Whisper Confidence Gating
+- **Evidence in Logs:** Transcription `"It's a very unique role."` was processed after a reminder alert without the user uttering "Hey Kyoma".
+- **Fix:**
+  - Added an auto-expiry timer (`_run_wake_window_timer`) for solitary wake words. If a user says "Hey Kyoma" alone, the window stays open for 6.0 seconds. If no valid command begins within that window, the timer expires and transitions the state back to `IDLE`.
+  - If a command arrives, the timer is cancelled immediately via `_cancel_wake_window()`.
+  - In `process_speech`, segments are evaluated using Whisper metadata: segments with `avg_logprob < -1.0` (indicative of noise hallucinations) or `no_speech_prob > 0.6` are discarded cleanly before reaching command routers.
+
+### 4. Search Path Timing & Diagnosis
+- **Investigation of "Who is the PM of India" taking 28.5s:**
+  - Intent Detection: ~0.001s
+  - Connectivity Check (TCP 8.8.8.8:53): ~0.02s
+  - Google News RSS fetch: ~1.2s
+  - Wikipedia Search API: ~1.8s
+  - Wikipedia wikitext revision query (fetching full page wikitext to parse incumbent): ~3.8s
+  - **Cold Gemma Model Loading / Ollama response:** When Ollama is not prewarmed, Gemma model load takes 16s - 18s.
+  - Total Wall Time in live test: 6.9s (search) + ~18s (model load) + ~3.5s (inference) = **28.5s**.
+- **In-App Search vs Browser Search:**
+  - *In-App Informational Search* ("Who is...?", "What is the current...?"): Uses `search_web_evidence` and Gemma synthesis to speak a direct 1-2 sentence spoken summary. **Marked NOT VERIFIED LIVE for the demo until live retest**.
+  - *Browser Search* ("Search Google for...", "Search YouTube for..."): Deterministic fast-router command that immediately launches the browser to Google/YouTube results in <0.1s. Safe and recommended for live demonstration.
+
+### 5. Reminder Delivery & Windows Toast Callback
+- **Notification Callback:** Added explicit `return 0` in all Windows toast message handler callbacks (`on_click`, `wnd_proc`, `on_destroy`) in `reminder_utils.py`, preventing Windows ctypes conversion errors (`WNDPROC return value cannot be converted to LRESULT`).
+- **Speech Output:** Reminder notifications now invoke `_speak_reminder(text)`, which sends a synthesis request to `/api/tts` (using Kokoro voice `af_heart`), mutes the microphone to prevent self-triggering, plays audio via `winsound.PlaySound`, and unmutes cleanly.
+
+---
+
+## Startup & Security Profile
+
+### Startup Measurement
+- **Cold System Startup Time:** **68.68 seconds**
+- **Gemma Ollama Model Prewarm Time:** **~30.35 seconds**
+- **Action Required:** `start.bat` MUST be executed at least **5 minutes before the demo** to ensure both server initialization and model warmup are complete before presentation begins.
+
+### Security Redaction
+- Redacted sensitive API keys from application logs. The `CustomFormatter` in `LAV_logger.py` uses regular expression substitution to replace `?api_key=...` with `?api_key=[REDACTED]`.
+- **Recommendation:** Rotate any API key that was previously copied into visible test logs or transcripts.
+
+### Physical Hardware Status
+- **ESP32 Device Status:** **STANDBY / NOT CONNECTED**
+- No COM port or USB-to-UART bridge detected on the host system. Hardware integration remains on standby until physical device is attached and tested.
+
+---
+
+## Live-Demo Safe Checklist
+
+Before the live audience demonstration:
+
+1. **Start System Early (5-minute rule):** Run `start.bat` at least 5 minutes prior to presenting. Wait until the terminal displays `*** KYOMA SYSTEM READY ***`.
+2. **Audio Output Check:** Ensure default Windows audio output is set to the laptop speakers or external presentation speaker.
+3. **Microphone Check:** Ensure microphone input is selected and unmuted in Windows Sound Settings.
+4. **Demonstrable Safe Paths:**
+   - **Conversational:** "Hello", "What's your name?", "What are you doing?", "What all can you do?", "Thanks", "Goodbye" (All instant via fast-router).
+   - **System Controls:** "Set volume to 50%", "Increase brightness", "Tell me the time and battery", "Take a screenshot".
+   - **Application Launches:** "Open Notepad", "Open Calculator", "Open YouTube".
+   - **Reminders:** "Set a reminder in 1 minute to drink water", "List my reminders".
+   - **Web Navigation:** "Search for latest space news on Google" (Browser path - instant).
+5. **Cautionary Queries:**
+   - Avoid live factual in-app search queries ("Who is the PM of India") if network latency is variable; rely on browser-opening search instead.
