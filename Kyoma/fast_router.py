@@ -225,6 +225,12 @@ _RE_RESTART    = re.compile(r"\b(?:restart(?:\s+(?:track|song|music))?|replay(?:
 _RE_SCREENSHOT = re.compile(r"\b(?:(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?|grab\s+(?:a\s+)?)?(?:screenshot|screen\s*shot|ss)(?:\s+and\s+save\s+it\s+as\s+([a-zA-Z0-9_\-]+))?(?:\s+(?:now|please))?|screen(?:\s+)?shot|screen\s+capture|screengrab|capture\s+screen|grab\s+screen)\b", _F)
 # ── Reminders & Capabilities Patterns ─────────────────────────────────────────
 _RE_REMINDERS  = re.compile(r"\b(?:(?:list|show|view|check|read|get)(?:\s+all)?(?:\s+my)?\s+reminders?|reminders?\s+(?:list|status)|what\s+are\s+my\s+reminders?|do\s+i\s+have\s+any\s+reminders?)\b", _F)
+_RE_GREETING     = re.compile(r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening)|howdy|greetings)[\!\.\?\s]*$", _F)
+_RE_NAME         = re.compile(r"\b(?:what(?:'s|\s+is)\s+your\s+name|who\s+are\s+you|introduce\s+yourself)\b", _F)
+_RE_DOING        = re.compile(r"\bwhat\s+are\s+you\s+doing\b", _F)
+_RE_THANKS       = re.compile(r"^(?:thanks|thank\s+you(?:\s+very\s+much|\s+so\s+much)?)[\!\.\?\s]*$", _F)
+_RE_BYE          = re.compile(r"^(?:bye|goodbye|see\s+you(?:\s+later)?|farewell|exit)[\!\.\?\s]*$", _F)
+_RE_OPEN_BARE    = re.compile(r"^(?:open|launch|start)[\!\.\?\s]*$", _F)
 _RE_WHO          = re.compile(r"\b(?:who\s+are\s+you|introduce\s+yourself)\b", _F)
 _RE_CAPABILITIES = re.compile(r"\b(?:what\s+(?:all\s+)?(?:can\s+you\s+do|you\s+can\s+do)|what\s+are\s+your\s+(?:capabilities|features)|help\s+me)\b", _F)
 _RE_STATUS     = re.compile(r"\b(?:what(?:'s|\s+is)\s+(?:the\s+)?status|system\s+status|pc\s+status|device\s+status|^status$)\b", _F)
@@ -578,6 +584,25 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         batt_clean = re.sub(r'^battery\s+at\s+', '', batt_raw.strip(), flags=re.I).rstrip('.')
         batt_clean = batt_clean.replace("%", " percent")
         return f"It's {time_clean}, and the battery is at {batt_clean}.", True
+
+    # ── DETERMINISTIC CONVERSATIONAL RESPONSES ────────────────────────────────
+    if _RE_GREETING.match(text):
+        return "Hello! How can I help you today?", True
+
+    if _RE_NAME.search(text):
+        return "I'm KYOMA, your AI desktop companion.", True
+
+    if _RE_DOING.search(text):
+        return "I'm here and ready to help.", True
+
+    if _RE_THANKS.match(text):
+        return "You're welcome!", True
+
+    if _RE_BYE.match(text):
+        return "Goodbye! Have a great day.", True
+
+    if _RE_OPEN_BARE.match(text):
+        return "What would you like me to open?", True
 
     if _RE_WHO.search(text):
         return "I'm KYOMA, your AI desktop companion.", True
