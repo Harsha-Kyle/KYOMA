@@ -198,15 +198,15 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
             except Exception as _cb_err:
                 print(f"[KYOMA_SEARCH] pre_search_callback error (ignored): {_cb_err}")
 
-        # 3. Execute search in a thread with hard 15-second timeout
+        # 3. Execute search in a thread with hard 6.0-second timeout
         search_result = None
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _executor:
                 _future = _executor.submit(search_web_evidence, user_text.strip(), 3)
                 try:
-                    search_result = _future.result(timeout=15.0)
+                    search_result = _future.result(timeout=6.0)
                 except concurrent.futures.TimeoutError:
-                    print("[KYOMA_SEARCH] Search timed out after 15s")
+                    print("[KYOMA_SEARCH] Search timed out after 6.0s")
                     search_result = None
                 except Exception as _se:
                     print(f"[KYOMA_SEARCH] Search exception: {_se}")
@@ -344,6 +344,10 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
                 print(f"Demo Mode refusal applied for {func_name}")
                 memory.add_tool_message(text=refusal_msg, name=func_name)
                 executed_results.append((func_name, refusal_msg, True))
+                # Prune refused command context to prevent subsequent turns from inheriting refused arguments
+                if hasattr(memory, "history") and len(memory.history) > 1:
+                    # Clear the immediately preceding user message from history so future tool calls cannot hallucinate its parameters
+                    memory.history = [m for m in memory.history if m.get("content") != user_text]
                 continue
 
             fn = tools_dict.get(func_name)

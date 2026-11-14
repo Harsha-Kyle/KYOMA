@@ -1,6 +1,25 @@
 import sys
 import os
+import re
+import logging
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+
+# Redact sensitive api_key queries from uvicorn access logs
+class RedactAPIKeyFilter(logging.Filter):
+    def filter(self, record):
+        if hasattr(record, "args") and isinstance(record.args, tuple):
+            new_args = []
+            for arg in record.args:
+                if isinstance(arg, str):
+                    new_args.append(re.sub(r"([?&]api_key=)[^&\s]+", r"\1[REDACTED]", arg))
+                else:
+                    new_args.append(arg)
+            record.args = tuple(new_args)
+        if record.msg and isinstance(record.msg, str):
+            record.msg = re.sub(r"([?&]api_key=)[^&\s]+", r"\1[REDACTED]", record.msg)
+        return True
+
+logging.getLogger("uvicorn.access").addFilter(RedactAPIKeyFilter())
 
 import time
 from services.lib.startup_progress import startup_progress
@@ -299,6 +318,17 @@ async def _on_startup():
         logger.info("[VoiceInput] state_callback connected to broadcast_state_all.")
     except Exception as _e:
         logger.warning(f"[VoiceInput] Could not connect state_callback: {_e}")
+
+    try:
+        # Register in-process voice_input and tts with Kyoma reminder_utils
+        kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
+        if kyoma_path not in sys.path:
+            sys.path.append(kyoma_path)
+        import reminder_utils
+        reminder_utils.register_voice_services(voice_input=voice_input, tts=tts)
+        logger.info("[Reminder] In-process voice services registered with reminder_utils.")
+    except Exception as _re:
+        logger.warning(f"[Reminder] Could not register in-process voice services: {_re}")
 
     # Startup Health Check
     try:

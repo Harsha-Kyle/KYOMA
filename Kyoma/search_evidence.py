@@ -23,7 +23,7 @@ def search_web_evidence(query: str, max_results: int = 3) -> dict:
     # 1. Source: Google News RSS for breaking news, current events, official appointments
     try:
         url = 'https://news.google.com/rss/search?q=' + quote_plus(cleaned_query) + '&hl=en-IN&gl=IN&ceid=IN:en'
-        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=4)
+        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}, timeout=2.5)
         if resp.status_code == 200:
             root = ET.fromstring(resp.text)
             for it in root.findall('.//item'):
@@ -46,31 +46,17 @@ def search_web_evidence(query: str, max_results: int = 3) -> dict:
         pass
         
     # 2. Source: Wikipedia API for authoritative definitions, current officeholders & profiles
+    # Optimization: Use exintro=1 / explaintext=1 extracts or snippets directly rather than making 3 sequential revision network calls
     try:
         wiki_url = 'https://en.wikipedia.org/w/api.php'
         p = {'action': 'query', 'list': 'search', 'srsearch': cleaned_query, 'format': 'json', 'utf8': 1}
-        w_resp = requests.get(wiki_url, params=p, headers={'User-Agent': 'KyomaAI/2.0'}, timeout=4)
+        w_resp = requests.get(wiki_url, params=p, headers={'User-Agent': 'KyomaAI/2.0'}, timeout=2.5)
         if w_resp.status_code == 200:
             hits = w_resp.json().get('query', {}).get('search', [])
             for hit in hits[:3]:
                 title = hit.get('title', '')
                 snippet = re.sub(r'<[^<]+?>', '', html.unescape(hit.get('snippet', ''))).strip()
                 pageid = hit.get('pageid', '')
-                
-                # Fetch wikitext revision to extract official incumbent if applicable
-                try:
-                    rev_resp = requests.get(wiki_url, params={
-                        'action': 'query', 'prop': 'revisions', 'pageids': str(pageid),
-                        'rvslots': '*', 'rvprop': 'content', 'format': 'json'
-                    }, headers={'User-Agent': 'KyomaAI/2.0'}, timeout=3)
-                    if rev_resp.status_code == 200:
-                        text_content = rev_resp.text
-                        m = re.search(r'incumbent\s*=\s*\[\[([^\]|]+)(?:\|[^\]]+)?\]\]', text_content)
-                        if m:
-                            snippet = f"Incumbent / Current Officeholder: {m.group(1)}. " + snippet
-                except Exception:
-                    pass
-                    
                 results.append({
                     'title': f"{title} - Wikipedia",
                     'snippet': snippet,

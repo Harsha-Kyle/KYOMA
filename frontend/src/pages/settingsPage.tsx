@@ -2,6 +2,7 @@ import { Panel } from "@/components/panel";
 import SettingSwitch from "@/components/setting-switch";
 import SettingDropdown from "@/components/setting-dropdown";
 import { useSettings } from "@/context/SettingsContext";
+import { apiFetch } from "@/lib/api-client";
 
 function SettingsPage() {
     const { loading } = useSettings();
@@ -27,8 +28,13 @@ function SettingsPage() {
                     onValueChange={(val) => {
                         const fd = new FormData();
                         fd.append("mode", val);
-                        fetch("/api/record/input_mode", { method: "POST", body: fd }).catch(() => {});
+                        apiFetch("/api/record/input_mode", { method: "POST", body: fd }).catch(() => {});
                     }}
+                />
+                <SettingSwitch
+                    id="reminder.speak_aloud"
+                    label="Speak Reminders Aloud"
+                    description="When enabled, reminders are spoken aloud via Kokoro TTS in addition to toast notifications."
                 />
                 <SettingSwitch
                     id="load-llm-cpu"

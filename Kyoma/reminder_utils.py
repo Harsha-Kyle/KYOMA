@@ -11,6 +11,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="win10toast_click")
 
 import threading
+import queue
 import sqlite3
 import ctypes
 import datetime
@@ -59,42 +60,130 @@ LOG_PATH = reminder_folder / "reminder.log"
 
 toaster = ToastNotifier()
 
+_voice_input_instance = None
+_tts_instance = None
+
+def register_voice_services(voice_input=None, tts=None):
+    """Register in-process voice_input and tts instances for safe coordination."""
+    global _voice_input_instance, _tts_instance
+    if voice_input is not None:
+        _voice_input_instance = voice_input
+    if tts is not None:
+        _tts_instance = tts
+
+def _is_reminder_voice_enabled() -> bool:
+    """Check if 'reminder.speak_aloud' is enabled in settings.json or kyoma_config.json."""
+    try:
+        settings_file = Path(__file__).resolve().parent.parent / "backend" / "settings.json"
+        if settings_file.exists():
+            import json
+            with open(settings_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if "reminder.speak_aloud" in data:
+                    return bool(data["reminder.speak_aloud"])
+    except Exception:
+        pass
+    return True
+
+# In-process thread-safe reminder queue coordinator
+_reminder_speech_queue = queue.Queue()
+_reminder_worker_running = False
+_reminder_lock = threading.Lock()
+
+def _reminder_playback_worker():
+    import time
+    import winsound
+    import requests
+    global _reminder_worker_running
+
+    while True:
+        try:
+            text = _reminder_speech_queue.get(timeout=2.0)
+        except queue.Empty:
+            with _reminder_lock:
+                _reminder_worker_running = False
+                break
+
+        # Wait if KYOMA is currently thinking or speaking
+        while True:
+            is_busy = False
+            if _voice_input_instance is not None:
+                if getattr(_voice_input_instance, "system_state", "IDLE") in ("THINKING", "SPEAKING"):
+                    is_busy = True
+            if not is_busy:
+                break
+            time.sleep(0.5)
+
+        # 1. Mute microphone before reminder playback
+        if _voice_input_instance is not None:
+            try:
+                _voice_input_instance.mute()
+            except Exception:
+                pass
+        else:
+            try:
+                requests.post("http://localhost:8000/api/record/mute", timeout=0.5)
+            except Exception:
+                pass
+
+        # 2. Synthesize audio via in-process TTS or HTTP fallback
+        audio_bytes = None
+        if _tts_instance is not None:
+            try:
+                audio_bytes = _tts_instance.synthesize(text)
+            except Exception as e:
+                log_event(f"⚠️ [Reminder TTS Direct Error] {e}")
+
+        if not audio_bytes:
+            try:
+                resp = requests.post(
+                    "http://localhost:8000/api/tts",
+                    json={"text": text},
+                    timeout=5.0
+                )
+                if resp.status_code == 200 and resp.content:
+                    audio_bytes = resp.content
+            except Exception as e:
+                log_event(f"⚠️ [Reminder TTS HTTP Error] {e}")
+
+        # 3. Play audio
+        if audio_bytes:
+            try:
+                winsound.PlaySound(audio_bytes, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+            except Exception as e:
+                log_event(f"⚠️ [Reminder PlaySound Error] {e}")
+
+        # 4. Unmute microphone and restore idle/wake_word standby
+        if _voice_input_instance is not None:
+            try:
+                _voice_input_instance.unmute()
+                _voice_input_instance.system_state = "IDLE"
+            except Exception:
+                pass
+        else:
+            try:
+                requests.post("http://localhost:8000/api/record/unmute", timeout=0.5)
+            except Exception:
+                pass
+
+        _reminder_speech_queue.task_done()
+
 def _speak_reminder(text: str):
     """
-    Speak reminder text aloud via TTS in a background thread.
-    Safely mutes microphone input during reminder playback and unmutes afterwards,
-    preventing self-triggering and false wake-word activations.
+    Queue reminder speech for playback. Checks 'reminder.speak_aloud' setting,
+    waits for LLM/TTS to finish, mutes the microphone in-process, plays audio,
+    and returns to idle/wake-word standby cleanly.
     """
-    def _run():
-        import requests
-        import winsound
-        # 1. Mute microphone before speech
-        try:
-            requests.post("http://localhost:8000/api/record/mute", timeout=0.5)
-        except Exception:
-            pass
+    if not _is_reminder_voice_enabled():
+        log_event(f"ℹ️ [Reminder Voice Skipped] 'reminder.speak_aloud' is disabled: '{text}'")
+        return
 
-        # 2. Synthesize audio via local TTS endpoint
-        played = False
-        try:
-            resp = requests.post(
-                "http://localhost:8000/api/tts",
-                json={"text": text},
-                timeout=5.0
-            )
-            if resp.status_code == 200 and resp.content:
-                winsound.PlaySound(resp.content, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
-                played = True
-        except Exception as e:
-            log_event(f"⚠️ [Reminder TTS Error     ] playback failed: {e}")
-
-        # 3. Unmute microphone after speech
-        try:
-            requests.post("http://localhost:8000/api/record/unmute", timeout=0.5)
-        except Exception:
-            pass
-
-    threading.Thread(target=_run, daemon=True).start()
+    global _reminder_worker_running
+    _reminder_speech_queue.put(text)
+    with _reminder_lock:
+        if not _reminder_worker_running:
+            _reminder_worker_running = True
+            threading.Thread(target=_reminder_playback_worker, daemon=True).start()
 
 # ----------------------
 # LOGGING
@@ -209,6 +298,12 @@ def add_reminder(title: str, message: str, remind_time: str, recurrence: str = N
     """
     if recurrence is None:
         recurrence = "one time"
+    # Prevent context contamination: if message is empty, whitespace, or looks like conversation residue, default to title
+    clean_title = (title or "").strip()
+    clean_msg = (message or "").strip()
+    if not clean_msg or clean_msg == clean_title:
+        clean_msg = clean_title
+
     remind_dt = None
     try:
         remind_dt = datetime.strptime(normalize_datetime(remind_time), "%Y-%m-%d %H:%M:%S")
@@ -224,7 +319,7 @@ def add_reminder(title: str, message: str, remind_time: str, recurrence: str = N
     c = conn.cursor()
     c.execute(
         "INSERT INTO reminders (title, message, time, status, repeat_interval) VALUES (?, ?, ?, ?, ?)",
-        (title, message, normalized_time, "pending", recurrence)
+        (clean_title, clean_msg, normalized_time, "pending", recurrence)
     )
     conn.commit()
     reminder_id = c.lastrowid
@@ -232,8 +327,8 @@ def add_reminder(title: str, message: str, remind_time: str, recurrence: str = N
 
     reminder = {
         "id": reminder_id,
-        "title": title,
-        "message": message,
+        "title": clean_title,
+        "message": clean_msg,
         "time": normalized_time,
         "repeat_interval": recurrence if recurrence else None
     }
@@ -548,6 +643,14 @@ def schedule_reminder(reminder, stagger_index=None):
 
     now = datetime.now()
     if remind_time <= now:
+        # If the reminder is older than 15 minutes, mark it missed/expired silently without firing audible alarm bursts
+        overdue_seconds = (now - remind_time).total_seconds()
+        if overdue_seconds > 900:  # > 15 minutes
+            mark_reminder_completed(reminder_id)
+            log_event(f"ℹ️ [Stale Reminder Auto-Cleared] '{title}' was {overdue_seconds/60:.1f} mins overdue — marked completed.")
+            print(f"ℹ️ Auto-cleared stale reminder '{title}' ({overdue_seconds/60:.1f} mins overdue)")
+            return
+
         if stagger_index is not None:
             delay_seconds = 15
             run_date = now + timedelta(seconds=delay_seconds * stagger_index)

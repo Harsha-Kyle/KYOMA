@@ -127,6 +127,7 @@ class VoiceInput:
             self.vad_model = None
         self.processing_lock = asyncio.Lock()
         self.is_muted = False
+        self.transcription_in_flight = False  # Guard against overlapping transcription jobs
         self._wake_window_task: asyncio.Task | None = None  # auto-close wake window on timeout
 
     def _reset_buffers(self):
@@ -142,6 +143,7 @@ class VoiceInput:
         """Immediately discard incoming audio and purge all buffers."""
         self.is_muted = True
         self._reset_buffers()
+        self.transcription_in_flight = False
         if hasattr(self, 'vad_iterator') and self.vad_iterator:
             try:
                 self.vad_iterator.reset_states()
@@ -152,6 +154,7 @@ class VoiceInput:
     def unmute(self):
         """Resume accepting audio and reset state cleanly."""
         self._reset_buffers()
+        self.transcription_in_flight = False
         if hasattr(self, 'vad_iterator') and self.vad_iterator:
             try:
                 self.vad_iterator.reset_states()
@@ -212,16 +215,20 @@ class VoiceInput:
         )
 
     async def _process_audio(self, audio_np, clients):
-        # Guard: drop stale coroutines that were queued before mute was set.
-        # The audio_callback already skips when is_muted, but coroutines that
-        # were already in-flight (run_coroutine_threadsafe) can still arrive
-        # here. Discard them so old frames cannot leak into the next utterance.
-        if not self.running or self.is_muted:
+        # Guard: drop stale coroutines that were queued before mute was set,
+        # or if a transcription job is already in flight.
+        # Discard them so old frames cannot leak into the next utterance.
+        if not self.running or self.is_muted or self.transcription_in_flight:
             return
 
         self.tmp_audio_buffer.extend(audio_np)
 
         while len(self.tmp_audio_buffer) >= 512:
+            # Re-check guards inside chunk loop
+            if self.is_muted or self.transcription_in_flight:
+                self.tmp_audio_buffer.clear()
+                break
+
             chunk = np.array(self.tmp_audio_buffer[:512])
             self.tmp_audio_buffer = self.tmp_audio_buffer[512:]
 
@@ -262,34 +269,40 @@ class VoiceInput:
                 post = self.tmp_audio_buffer[:int(self.POST_SPEECH_SAMPLES)]
                 self.sentence_audio_buffer.extend(post)
 
-                # ── Per-utterance diagnostics ──────────────────────────────
-                _all_samples = np.array(self.sentence_audio_buffer, dtype=np.float32)
-                _utt_dur_s = len(_all_samples) / self.SAMPLING_RATE
-                if self._utt_probs:
-                    _rms = float(np.sqrt(np.mean(_all_samples ** 2))) if len(_all_samples) else 0.0
-                    _avg_prob = float(np.mean(self._utt_probs))
-                    _max_prob = float(np.max(self._utt_probs))
-                    logger.info(
-                        f"[VAD_DIAG] utterance_end | "
-                        f"avg_speech_prob={_avg_prob:.3f} | max_speech_prob={_max_prob:.3f} | "
-                        f"peak_amplitude={self._utt_peak:.4f} | rms={_rms:.4f} | "
-                        f"duration_s={_utt_dur_s:.2f} | "
-                        f"silence_dur_s={self._vad_silence_duration:.3f} | "
-                        f"threshold={self._vad_speech_threshold:.2f}"
-                    )
-
-                # ── Barge-in check ──────────────────────────────────────────
-                if self.system_state == "SPEAKING" and _utt_dur_s >= 0.3:
-                    logger.info("[VoiceInput] Barge-in detected during SPEAKING! Interrupting audio.")
-                    if self.barge_in_callback:
-                        try:
-                            self.barge_in_callback()
-                        except Exception as _bie:
-                            logger.debug(f"[VoiceInput] Barge-in callback error: {_bie}")
-                    self.system_state = "LISTENING"
-                    asyncio.create_task(self._safe_broadcast_state("LISTENING"))
-
                 async with self.processing_lock:
+                    if self.transcription_in_flight:
+                        self.vad_iterator.reset_states()
+                        self._reset_buffers()
+                        self.tmp_audio_buffer.clear()
+                        continue
+
+                    # ── Per-utterance diagnostics ──────────────────────────────
+                    _all_samples = np.array(self.sentence_audio_buffer, dtype=np.float32)
+                    _utt_dur_s = len(_all_samples) / self.SAMPLING_RATE
+                    if self._utt_probs:
+                        _rms = float(np.sqrt(np.mean(_all_samples ** 2))) if len(_all_samples) else 0.0
+                        _avg_prob = float(np.mean(self._utt_probs))
+                        _max_prob = float(np.max(self._utt_probs))
+                        logger.info(
+                            f"[VAD_DIAG] utterance_end | "
+                            f"avg_speech_prob={_avg_prob:.3f} | max_speech_prob={_max_prob:.3f} | "
+                            f"peak_amplitude={self._utt_peak:.4f} | rms={_rms:.4f} | "
+                            f"duration_s={_utt_dur_s:.2f} | "
+                            f"silence_dur_s={self._vad_silence_duration:.3f} | "
+                            f"threshold={self._vad_speech_threshold:.2f}"
+                        )
+
+                    # ── Barge-in check ──────────────────────────────────────────
+                    if self.system_state == "SPEAKING" and _utt_dur_s >= 0.3:
+                        logger.info("[VoiceInput] Barge-in detected during SPEAKING! Interrupting audio.")
+                        if self.barge_in_callback:
+                            try:
+                                self.barge_in_callback()
+                            except Exception as _bie:
+                                logger.debug(f"[VoiceInput] Barge-in callback error: {_bie}")
+                        self.system_state = "LISTENING"
+                        asyncio.create_task(self._safe_broadcast_state("LISTENING"))
+
                     # Ignore utterances shorter than 0.4 seconds per spec
                     if _utt_dur_s < 0.4:
                         self.vad_iterator.reset_states()
@@ -303,78 +316,89 @@ class VoiceInput:
                     self._reset_buffers()
                     # Also drain the tmp_audio_buffer so stale pre-speech frames
                     # from this utterance cannot bleed into the next detection cycle.
-                    # We keep at most PRE_SPEECH_SAMPLES worth of recent audio as a
-                    # natural lead-in, then clear the rest.
                     if len(self.tmp_audio_buffer) > int(self.PRE_SPEECH_SAMPLES):
                         self.tmp_audio_buffer = self.tmp_audio_buffer[-int(self.PRE_SPEECH_SAMPLES):]
+                    else:
+                        self.tmp_audio_buffer.clear()
                     
-                    # Run Whisper in a thread so it doesn't block the event loop
-                    loop = asyncio.get_event_loop()
-                    transcribed_text = await loop.run_in_executor(
-                        None, self.process_speech, audio_array
-                    )
+                    self.transcription_in_flight = True
+                    try:
+                        # Run Whisper in a thread so it doesn't block the event loop
+                        loop = asyncio.get_event_loop()
+                        transcribed_text = await loop.run_in_executor(
+                            None, self.process_speech, audio_array
+                        )
 
-                    if transcribed_text:
-                        # ── Wake Word & State Flow ─────────────────────────
-                        active_text = transcribed_text
-                        import time
-                        now = time.time()
+                        if transcribed_text:
+                            # ── Wake Word & State Flow ─────────────────────────
+                            active_text = transcribed_text
+                            import time
+                            now = time.time()
 
-                        if self.input_mode == "wake_word":
-                            import re
-                            wake_pat = re.compile(
-                                r"\b(?:hey|hi|ok|okay)\s+(?:kyoma|coma|koma|kioma)\b|\bkyoma\b",
-                                re.IGNORECASE
-                            )
-                            m = wake_pat.search(transcribed_text)
-                            if m:
-                                remainder = re.sub(r"^[,\.\?!;:\s\-]+", "", transcribed_text[m.end():]).strip()
-                                if remainder:
-                                    # Wake word and command in same utterance
-                                    active_text = remainder
+                            if self.input_mode == "wake_word":
+                                import re
+                                wake_pat = re.compile(
+                                    r"\b(?:hey|hi|ok|okay)\s+(?:kyoma|coma|koma|kioma)\b|\bkyoma\b",
+                                    re.IGNORECASE
+                                )
+                                m = wake_pat.search(transcribed_text)
+                                if m:
+                                    remainder = re.sub(r"^[,\.\?!;:\s\-]+", "", transcribed_text[m.end():]).strip()
+                                    if remainder:
+                                        # Wake word and command in same utterance -> accept command, enter THINKING, mute mic
+                                        active_text = remainder
+                                        self.system_state = "THINKING"
+                                        self.mute()
+                                        asyncio.create_task(self._safe_broadcast_state("THINKING"))
+                                    else:
+                                        # Wake word alone: open 6-second window, transition to LISTENING
+                                        self._wake_active_until = now + self.wake_word_timeout
+                                        self.system_state = "LISTENING"
+                                        logger.info(f"[WakeWord] Wake word detected alone. Window open for {self.wake_word_timeout}s.")
+                                        asyncio.create_task(self._safe_broadcast_state("LISTENING"))
+                                        self._cancel_wake_window()
+                                        self._wake_window_task = asyncio.create_task(
+                                            self._run_wake_window_timer(self.wake_word_timeout)
+                                        )
+                                        continue
+                                elif now < self._wake_active_until:
+                                    # Within open 6-second command window -> accept command, enter THINKING, mute mic
+                                    self._wake_active_until = 0.0
+                                    self._cancel_wake_window()
+                                    active_text = transcribed_text
                                     self.system_state = "THINKING"
+                                    self.mute()
                                     asyncio.create_task(self._safe_broadcast_state("THINKING"))
                                 else:
-                                    # Wake word alone: open 6-second window, transition to LISTENING
-                                    self._wake_active_until = now + self.wake_word_timeout
-                                    self.system_state = "LISTENING"
-                                    logger.info(f"[WakeWord] Wake word detected alone. Window open for {self.wake_word_timeout}s.")
-                                    asyncio.create_task(self._safe_broadcast_state("LISTENING"))
-                                    self._cancel_wake_window()
-                                    self._wake_window_task = asyncio.create_task(
-                                        self._run_wake_window_timer(self.wake_word_timeout)
-                                    )
+                                    # Wake-word mode active but wake word not detected; ignore
+                                    logger.debug(f"[WakeWord] Utterance ignored (no wake word, outside window): {transcribed_text!r}")
                                     continue
-                            elif now < self._wake_active_until:
-                                # Within open 6-second command window
-                                self._wake_active_until = 0.0
-                                self._cancel_wake_window()
-                                active_text = transcribed_text
+                            elif self.input_mode == "always_listening":
+                                # Always listening mode accepts speech directly
                                 self.system_state = "THINKING"
+                                self.mute()
                                 asyncio.create_task(self._safe_broadcast_state("THINKING"))
-                            else:
-                                # Wake-word mode active but wake word not detected; ignore
-                                logger.debug(f"[WakeWord] Utterance ignored (no wake word, outside window): {transcribed_text!r}")
-                                continue
-                        elif self.input_mode == "push_to_talk":
-                            # In PTT mode, standard background mic capture is bypassed unless triggered
-                            pass
+                            elif self.input_mode == "push_to_talk":
+                                # In PTT mode, standard background mic capture is bypassed unless triggered
+                                pass
 
-                        if active_text != self.last_transcription:
-                            self.last_transcription = active_text
-                            logger.info(f"[STT] Transcribed: {active_text}")
-                            # Notify frontend WebSocket clients (if any are connected)
-                            dead_clients = set()
-                            for client in list(clients):
-                                try:
-                                    await client.send_json({"type": "transcription", "text": active_text})
-                                except Exception:
-                                    dead_clients.add(client)
-                            clients -= dead_clients
-                            # In ESP32 mode, trigger the autonomous LLM→TTS pipeline ONLY if no frontend WebUI client is connected.
-                            # If frontend is connected, the frontend will handle it via its WebSocket event.
-                            if self.esp32_mode and self.esp32_pipeline_callback and len(clients) == 0:
-                                asyncio.create_task(self.esp32_pipeline_callback(active_text))
+                            if active_text != self.last_transcription:
+                                self.last_transcription = active_text
+                                logger.info(f"[STT] Transcribed: {active_text}")
+                                # Notify frontend WebSocket clients (if any are connected)
+                                dead_clients = set()
+                                for client in list(clients):
+                                    try:
+                                        await client.send_json({"type": "transcription", "text": active_text})
+                                    except Exception:
+                                        dead_clients.add(client)
+                                clients -= dead_clients
+                                # In ESP32 mode, trigger the autonomous LLM→TTS pipeline ONLY if no frontend WebUI client is connected.
+                                # If frontend is connected, the frontend will handle it via its WebSocket event.
+                                if self.esp32_mode and self.esp32_pipeline_callback and len(clients) == 0:
+                                    asyncio.create_task(self.esp32_pipeline_callback(active_text))
+                    finally:
+                        self.transcription_in_flight = False
 
     def _cancel_wake_window(self):
         """Cancel any pending wake-window expiry task."""

@@ -226,13 +226,14 @@ _RE_SCREENSHOT = re.compile(r"\b(?:(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?|grab\
 # ── Reminders & Capabilities Patterns ─────────────────────────────────────────
 _RE_REMINDERS  = re.compile(r"\b(?:(?:list|show|view|check|read|get)(?:\s+all)?(?:\s+my)?\s+reminders?|reminders?\s+(?:list|status)|what\s+are\s+my\s+reminders?|do\s+i\s+have\s+any\s+reminders?)\b", _F)
 _RE_GREETING     = re.compile(r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening)|howdy|greetings)[\!\.\?\s]*$", _F)
+_RE_SAY_HI_TO    = re.compile(r"\b(?:say\s+(?:hi|hello)\s+to|greet)\s+([a-zA-Z\s]+)[\!\.\?\s]*$", _F)
 _RE_NAME         = re.compile(r"\b(?:what(?:'s|\s+is)\s+your\s+name|who\s+are\s+you|introduce\s+yourself)\b", _F)
-_RE_DOING        = re.compile(r"\bwhat\s+are\s+you\s+doing\b", _F)
+_RE_DOING        = re.compile(r"\b(?:what\s+are\s+you\s+doing|how\s+are\s+you(?:\s+doing)?|how's\s+it\s+going)\b", _F)
 _RE_THANKS       = re.compile(r"^(?:thanks|thank\s+you(?:\s+very\s+much|\s+so\s+much)?)[\!\.\?\s]*$", _F)
 _RE_BYE          = re.compile(r"^(?:bye|goodbye|see\s+you(?:\s+later)?|farewell|exit)[\!\.\?\s]*$", _F)
 _RE_OPEN_BARE    = re.compile(r"^(?:open|launch|start)[\!\.\?\s]*$", _F)
 _RE_WHO          = re.compile(r"\b(?:who\s+are\s+you|introduce\s+yourself)\b", _F)
-_RE_CAPABILITIES = re.compile(r"\b(?:what\s+(?:all\s+)?(?:can\s+you\s+do|you\s+can\s+do)|what\s+are\s+your\s+(?:capabilities|features)|help\s+me)\b", _F)
+_RE_CAPABILITIES = re.compile(r"\b(?:what\s+(?:all\s+)?(?:can\s+you\s+do|you\s+can\s+do)|what\s+are\s+your\s+(?:capabilities|features)|state\s+your\s+features|list\s+your\s+features|help\s+me)\b", _F)
 _RE_STATUS     = re.compile(r"\b(?:what(?:'s|\s+is)\s+(?:the\s+)?status|system\s+status|pc\s+status|device\s+status|^status$)\b", _F)
 
 # Word numbers mapping for reminder intervals
@@ -336,6 +337,21 @@ def _natural_join(items: list[str]) -> str:
 # Core routing logic
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _normalize_speech_text(text: str) -> str:
+    """Normalize transcribed speech: clean stray commas, repeated periods, and extra whitespace."""
+    if not text:
+        return ""
+    t = text.strip()
+    # Replace internal commas that separate words, e.g. "Reduce, Brightness" -> "Reduce Brightness"
+    # but avoid stripping if comma was between digits or special queries
+    t = re.sub(r'(\w+)\s*,\s*(\w+)', r'\1 \2', t)
+    # Remove leading/trailing punctuation except question marks at the very end
+    t = re.sub(r'^[,\.\?!;:\s\-]+', '', t)
+    t = re.sub(r'[,\.;:\-]+$', '', t)
+    # Collapse multiple whitespaces
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
 def route(text: str) -> Tuple[Optional[str], bool]:
     """
     Public entry point. Handles single or multiple commands split by coordinating conjunctions.
@@ -348,9 +364,10 @@ def route(text: str) -> Tuple[Optional[str], bool]:
     if not text or not text.strip():
         return None, False
     try:
-        cleaned = text.strip()
+        cleaned = _normalize_speech_text(text)
         # Strip wake phrase if present at the start: "Hey Kyoma, " or "Kyoma, "
         cleaned = re.sub(r'^(?:hey\s+)?kyoma[\s,:\-]+', '', cleaned, flags=re.I).strip()
+        cleaned = _normalize_speech_text(cleaned)
         
         # 1. Check for compound commands FIRST
         # Shared action: "increase brightness and volume" or "decrease volume and brightness"
@@ -586,6 +603,10 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         return f"It's {time_clean}, and the battery is at {batt_clean}.", True
 
     # ── DETERMINISTIC CONVERSATIONAL RESPONSES ────────────────────────────────
+    if m := _RE_SAY_HI_TO.search(text):
+        target = m.group(1).strip()
+        return f"Hello, {target}! Nice to meet you.", True
+
     if _RE_GREETING.match(text):
         return "Hello! How can I help you today?", True
 
@@ -593,7 +614,7 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         return "I'm KYOMA, your AI desktop companion.", True
 
     if _RE_DOING.search(text):
-        return "I'm here and ready to help.", True
+        return "I'm doing well and ready to help.", True
 
     if _RE_THANKS.match(text):
         return "You're welcome!", True
@@ -620,8 +641,15 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         return _say("disk_usage", r=result), True
 
     if _RE_SYSINFO.search(text):
-        result = _extract_result(t["get_system_info"]())
-        return _say("system_info", r=result), True
+        raw = _extract_result(t["get_system_info"]())
+        # Format natural speech: 'CPU: 9.2%, Memory: 64.5%, Boot: ...' -> 'CPU usage is 9 percent and memory usage is 65 percent.'
+        m_sys = re.search(r'CPU:\s*([\d\.]+)%?,\s*Memory:\s*([\d\.]+)%', raw, re.I)
+        if m_sys:
+            cpu_val = round(float(m_sys.group(1)))
+            mem_val = round(float(m_sys.group(2)))
+            return f"CPU usage is {cpu_val} percent and memory usage is {mem_val} percent.", True
+        clean_raw = raw.replace("%", " percent")
+        return clean_raw, True
 
     # ── YOUTUBE SEARCH ────────────────────────────────────────────────────────
 
