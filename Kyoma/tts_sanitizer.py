@@ -14,10 +14,16 @@ def sanitize_for_tts(text: str) -> str:
     s = str(text).strip()
 
     # If it's a dict or dict representation of a reminder
-    if "repeat_interval" in s or ("'title':" in s and "'time':" in s):
+    if "repeat_interval" in s or ("'title':" in s and "'time':" in s) or ("'id':" in s and "'title':" in s):
         m_title = re.search(r"['\"]title['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
+        m_time = re.search(r"['\"]time['\"]\s*:\s*['\"]([^'\"]+)['\"]", s)
         if m_title:
-            return f"Reminder set for {m_title.group(1).strip()}."
+            title_text = m_title.group(1).strip()
+            if m_time:
+                from reminder_utils import _format_natural_time
+                time_nat = _format_natural_time(m_time.group(1).strip())
+                return f"Reminder set for {title_text} {time_nat}."
+            return f"Reminder set for {title_text}."
         return "Reminder set successfully."
 
     # 1. Convert specific tool results to short natural confirmations

@@ -153,11 +153,14 @@ def _reminder_playback_worker():
             except Exception as e:
                 log_event(f"⚠️ [Reminder PlaySound Error] {e}")
 
-        # 4. Unmute microphone and restore idle/wake_word standby
+        # 4. Unmute microphone and restore appropriate standby state based on input mode
         if _voice_input_instance is not None:
             try:
                 _voice_input_instance.unmute()
-                _voice_input_instance.system_state = "IDLE"
+                if getattr(_voice_input_instance, "input_mode", "wake_word") == "always_listening":
+                    _voice_input_instance.system_state = "LISTENING"
+                else:
+                    _voice_input_instance.system_state = "IDLE"
             except Exception:
                 pass
         else:
