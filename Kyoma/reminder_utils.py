@@ -59,6 +59,43 @@ LOG_PATH = reminder_folder / "reminder.log"
 
 toaster = ToastNotifier()
 
+def _speak_reminder(text: str):
+    """
+    Speak reminder text aloud via TTS in a background thread.
+    Safely mutes microphone input during reminder playback and unmutes afterwards,
+    preventing self-triggering and false wake-word activations.
+    """
+    def _run():
+        import requests
+        import winsound
+        # 1. Mute microphone before speech
+        try:
+            requests.post("http://localhost:8000/api/record/mute", timeout=0.5)
+        except Exception:
+            pass
+
+        # 2. Synthesize audio via local TTS endpoint
+        played = False
+        try:
+            resp = requests.post(
+                "http://localhost:8000/api/tts",
+                json={"text": text},
+                timeout=5.0
+            )
+            if resp.status_code == 200 and resp.content:
+                winsound.PlaySound(resp.content, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+                played = True
+        except Exception as e:
+            log_event(f"⚠️ [Reminder TTS Error     ] playback failed: {e}")
+
+        # 3. Unmute microphone after speech
+        try:
+            requests.post("http://localhost:8000/api/record/unmute", timeout=0.5)
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
 # ----------------------
 # LOGGING
 # ----------------------
@@ -283,6 +320,10 @@ def trigger_reminder(title, message, reminder_id, repeat_interval=None):
     log_event(f"🔔 [Triggered              ] reminder : '{title}' - {message} at {datetime.now().strftime('%H:%M:%S')}")
     print(f"🔔 Reminder firing: '{title}' — {message}")
 
+    # Deliver reminder via spoken TTS audio with mic-mute protection
+    spoken_text = f"Reminder: {title}. {message}" if message and message != title else f"Reminder: {title}."
+    _speak_reminder(spoken_text)
+
     # Show the reminder toast
     try:
         toaster.show_toast(
@@ -323,6 +364,7 @@ def trigger_missed_reminder(title, message, reminder_id):
             mark_reminder_completed(reminder_id)
         return 0
 
+    _speak_reminder(f"You missed a reminder: {title}.")
     show_toast(f"Missed Reminder: {title}", f"{message}\n⏰ You missed it!", callback=on_click)
     log_event(f"⚠️ [Missed                 ] reminder : '{title}' - retry scheduled in 5 minutes")
 
