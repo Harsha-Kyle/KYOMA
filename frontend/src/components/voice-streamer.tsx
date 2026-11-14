@@ -23,6 +23,16 @@ export default function VoiceStreamer() {
   const isTTSPlayingRef = useRef<boolean>(false);
   const isLLMThinkingRef = useRef<boolean>(false);
 
+  // ── Turn-level mute lifecycle ─────────────────────────────────────────────
+  // A "turn" starts when the LLM begins thinking for a voice command and ends
+  // when the final chunk has played back and the queue is empty.
+  // We mute exactly once at turn start and unmute exactly once at turn end,
+  // regardless of how many chunk gaps exist between TTS segments.
+  const turnActiveRef = useRef<boolean>(false);
+  const muteIssuedRef = useRef<boolean>(false);
+  // Track the previous pipeline task ID so we can detect a new turn
+  const lastTaskIdRef = useRef<string | null>(null);
+
   useEffect(() => {
     // Subscribe to global recording state
     const unsubscribe = globalStateManager.subscribe('isVoiceRecording', async (recording) => {
@@ -32,6 +42,9 @@ export default function VoiceStreamer() {
         await apiFetch("/api/record/start", { method: "POST" });
       } else {
         await apiFetch("/api/record/stop", { method: "POST" });
+        // End any active turn when recording stops
+        turnActiveRef.current = false;
+        muteIssuedRef.current = false;
       }
     });
 
@@ -41,36 +54,65 @@ export default function VoiceStreamer() {
     return () => unsubscribe();
   }, []);
 
-  // Keep isTTSPlayingRef and isLLMThinkingRef in sync with globalStateManager
+  // ── Turn-level mute/unmute based on pipeline task state ──────────────────
+  // Poll pipeline manager every 200ms to track turn lifecycle precisely.
+  // This avoids mute/unmute churn between chunks.
   useEffect(() => {
-    const unsubTTS = globalStateManager.subscribe('isTTSPlaying', async (playing) => {
-      isTTSPlayingRef.current = playing;
-      if (globalStateManager.getState('isVoiceRecording')) {
-        if (playing) {
-          await apiFetch('/api/record/mute', { method: 'POST' });
-        } else if (!globalStateManager.getState('isLLMThinking')) {
-          await apiFetch('/api/record/unmute', { method: 'POST' });
-        }
-      }
-    });
-
-    const unsubLLM = globalStateManager.subscribe('isLLMThinking', async (thinking) => {
-      isLLMThinkingRef.current = thinking;
-      if (globalStateManager.getState('isVoiceRecording')) {
-        if (thinking) {
-          await apiFetch('/api/record/mute', { method: 'POST' });
-        } else if (!globalStateManager.getState('isTTSPlaying')) {
-          await apiFetch('/api/record/unmute', { method: 'POST' });
-        }
-      }
-    });
-
     isTTSPlayingRef.current = globalStateManager.getState('isTTSPlaying');
     isLLMThinkingRef.current = globalStateManager.getState('isLLMThinking');
+
+    const unsubTTS = globalStateManager.subscribe('isTTSPlaying', (playing) => {
+      isTTSPlayingRef.current = playing;
+    });
+    const unsubLLM = globalStateManager.subscribe('isLLMThinking', (thinking) => {
+      isLLMThinkingRef.current = thinking;
+    });
+
+    // Interval-based turn lifecycle manager
+    const intervalId = setInterval(async () => {
+      if (!globalStateManager.getState('isVoiceRecording')) return;
+
+      const currentTask = pipelineManager.getCurrentTask();
+      const isThinking = isLLMThinkingRef.current;
+      const isPlaying = isTTSPlayingRef.current;
+
+      // Detect new turn: a new active task has appeared
+      if (currentTask && currentTask.id !== lastTaskIdRef.current) {
+        lastTaskIdRef.current = currentTask.id;
+        // Fresh task – start of a new turn
+        if (!turnActiveRef.current) {
+          turnActiveRef.current = true;
+          muteIssuedRef.current = false;
+        }
+      }
+
+      if (turnActiveRef.current) {
+        // Mute exactly once at turn start
+        if (!muteIssuedRef.current && (isThinking || isPlaying)) {
+          muteIssuedRef.current = true;
+          await apiFetch('/api/record/mute', { method: 'POST' }).catch(() => {});
+        }
+
+        // Determine if the turn is complete:
+        // No active task AND neither thinking nor playing
+        const taskDone = !currentTask ||
+          currentTask.status === 'task_finished' ||
+          currentTask.status === 'cancelled';
+        const turnComplete = taskDone && !isThinking && !isPlaying;
+
+        if (turnComplete && muteIssuedRef.current) {
+          // Turn ended — unmute exactly once
+          turnActiveRef.current = false;
+          muteIssuedRef.current = false;
+          await apiFetch('/api/record/unmute', { method: 'POST' }).catch(() => {});
+        }
+      }
+    }, 200);
 
     return () => {
       unsubTTS();
       unsubLLM();
+      clearInterval(intervalId);
     };
   }, []);
 
