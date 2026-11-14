@@ -1382,6 +1382,11 @@ class SettingsManager:
                 llm.set_keep_model_loaded(value)
             if key == "stream.yt.videoid":
                 chat_fetch.video_id = value
+            if key == "input_mode":
+                clean_mode = str(value).lower().strip()
+                if clean_mode in ("always_listening", "wake_word", "push_to_talk") and 'voice_input' in globals():
+                    voice_input.input_mode = clean_mode
+                    logger.info(f"[Settings] VoiceInput input_mode set to '{clean_mode}'")
 
         # Apply TTS provider FIRST, then voice — order matters so voice is set on the correct engine
         for key, value in settings_items:
