@@ -1485,6 +1485,8 @@ class SettingsManager:
         for key, value in settings_items:
             if key == "llm.keep_model_loaded":
                 llm.set_keep_model_loaded(value)
+            if key == "load-llm-cpu" and hasattr(llm, "set_load_llm_cpu"):
+                llm.set_load_llm_cpu(bool(value))
             if key == "stream.yt.videoid":
                 chat_fetch.video_id = value
             if key == "input_mode":
@@ -1870,7 +1872,7 @@ app.middleware("http")(create_proxy_middleware("/api/rvc", rvc_server_port))
 
 if __name__ == "__main__":
     try:
-        uvicorn.run(app, host="0.0.0.0", port=8000)
+        uvicorn.run(app, host="127.0.0.1", port=8000)
     finally:
         # Stop all managed processes on shutdown
         process_manager.stop_all_servers()

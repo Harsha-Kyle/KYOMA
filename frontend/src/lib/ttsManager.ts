@@ -22,9 +22,10 @@ export class TTSManager {
     constructor() {
         // Read saved provider from the loading-screen settings cache so the
         // correct TTS engine is active immediately (no flash to gpt-sovits).
+        // Default to kokoro for safety and instant offline capability.
         const cached = (window as Window).__kyoma_settings_cache?.['tts.provider'] as TTSProvider | undefined;
         const validProviders: TTSProvider[] = ["gpt-sovits", "rvc", "kokoro"];
-        this.selectedProvider = (cached && validProviders.includes(cached)) ? cached : "gpt-sovits";
+        this.selectedProvider = (cached && validProviders.includes(cached)) ? cached : "kokoro";
         this.providers = {
             "gpt-sovits": new GPTSoVITSProvider(),
             "rvc": new RVCProvider(),

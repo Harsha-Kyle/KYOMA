@@ -68,8 +68,12 @@ class TTS:
     @property
     def kokoro(self):
         """Direct access to underlying Kokoro model for health checks and status."""
-        if self._active_provider == "kokoro" and hasattr(self._engine, "kokoro"):
-            return self._engine.kokoro
+        if self._active_provider == "kokoro":
+            if hasattr(self._engine, "kokoro") and self._engine.kokoro is not None:
+                return self._engine.kokoro
+            if getattr(self._engine, "available", False):
+                return self._engine
+        return None
         return None
 
     # ------------------------------------------------------------------

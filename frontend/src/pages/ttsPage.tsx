@@ -40,7 +40,7 @@ export default function TTSPage() {
           <CardContent>
             <SettingDropdown
               id="tts.provider"
-              defaultValue="gpt-sovits"
+              defaultValue="kokoro"
               options={{
                 "gpt-sovits": "GPT-SoVITS",
                 "rvc":        "RVC (Retrieval-based Voice Conversion)",

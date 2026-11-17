@@ -65,6 +65,10 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, []);
 
     const updateSetting = async (key: string, value: any) => {
+        // No-op if value hasn't changed
+        if (settings[key] === value) {
+            return;
+        }
         try {
             setSettings((prev) => ({ ...prev, [key]: value }));
             const response = await apiFetch('/api/settings/update', {
