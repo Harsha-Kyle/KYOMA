@@ -113,6 +113,7 @@ app = FastAPI()
 class APIKeyMiddleware(BaseHTTPMiddleware):
     EXEMPT_PATHS = {
         "/health", "/docs", "/openapi.json", "/", "/black.png", "/api/status",
+        "/api/startup/status", "/api/health/startup",
         "/api/tts", "/api/tts/provider", "/api/tts/voices", "/api/tts/change-voice",
         "/api/tts/kokoro/voices", "/api/tts/kokoro/speed"
     }
