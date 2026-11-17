@@ -79,17 +79,17 @@ const Chatbox = () => {
         const data = await fetchSessions();
         setSessionList(data);
         
-        // Auto-create 'Chat #N' on fresh app launch
-        const chatNum = (data?.length || 0) + 1;
-        const autoTitle = `Chat #${chatNum}`;
-        const newSessionId = await createNewSession(autoTitle);
-        if (newSessionId) {
-            const updated = await fetchSessions();
-            setSessionList(updated);
-            setSelectedSession(newSessionId);
-            window.__kyoma_sessions_cache = updated;
-        } else if (data.length > 0) {
+        // On app launch, use most recent existing session if available; otherwise create an initial "New Session"
+        if (data && data.length > 0) {
             setSelectedSession(data[0].id);
+        } else {
+            const newSessionId = await createNewSession("New Session");
+            if (newSessionId) {
+                const updated = await fetchSessions();
+                setSessionList(updated);
+                setSelectedSession(newSessionId);
+                window.__kyoma_sessions_cache = updated;
+            }
         }
     };
 
@@ -104,8 +104,7 @@ const Chatbox = () => {
     };
 
     const handleCreateNewSession = async () => {
-        const chatNum = (sessionList?.length || 0) + 1;
-        const newSessionId = await createNewSession(`Chat #${chatNum}`);
+        const newSessionId = await createNewSession("New Session");
         if (newSessionId) {
             await getSessions();
             setSelectedSession(newSessionId);
@@ -192,7 +191,7 @@ const Chatbox = () => {
         // Auto-rename session to topic preview if it's currently a default or numbered chat
         if (selectedSession) {
             const currentSession = sessionList.find(s => s.id === selectedSession);
-            if (currentSession && (/^Chat #\d+$/.test(currentSession.title) || currentSession.title === 'New Chat')) {
+            if (currentSession && (currentSession.title === 'New Session' || currentSession.title === 'New Chat' || /^Chat #\d+$/.test(currentSession.title))) {
                 const topic = input.trim().replace(/[\r\n]+/g, ' ');
                 const preview = topic.length > 28 ? topic.slice(0, 28).trim() + '...' : topic;
                 handleRenameSession(selectedSession, preview);
