@@ -26,6 +26,7 @@ from services.lib.startup_progress import startup_progress
 # Track import time
 start_time = time.time()
 total_start_time = time.time()
+startup_progress.get_subsystem("imports").start("Loading modules...")
 startup_progress.show_step("Importing python modules")
 
 import asyncio
@@ -70,6 +71,7 @@ download_progress = {}
 
 # Show import completion immediately after imports
 import_time = time.time() - start_time
+startup_progress.get_subsystem("imports").complete(f"Loaded in {import_time:.2f}s")
 startup_progress.complete_step(f"Imports completed in {import_time:.2f}s")
 
 # Initialize RVC server
@@ -80,7 +82,17 @@ rvc_dir = os.path.join(os.path.dirname(__file__), "plugins", "rvc")
 rvc_runtime_python = os.path.join(rvc_dir, "runtime", "python.exe")
 rvc_server_script = os.path.join(rvc_dir, "rvc_server.py")
 
-if os.path.exists(rvc_runtime_python) and os.path.exists(rvc_server_script):
+# In demo mode, skip launching RVC standalone pack subprocess
+try:
+    kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
+    if kyoma_path not in sys.path:
+        sys.path.append(kyoma_path)
+    from demo_safety import is_demo_mode_active
+    rvc_demo_mode = is_demo_mode_active()
+except Exception:
+    rvc_demo_mode = False
+
+if not rvc_demo_mode and os.path.exists(rvc_runtime_python) and os.path.exists(rvc_server_script):
     try:
         success, message = process_manager.start_server_process(
             name="RVC",
@@ -127,6 +139,12 @@ app.add_middleware(APIKeyMiddleware)
 async def health():
     return {"status": "ok"}
 
+@app.get("/api/startup/status")
+async def get_startup_status():
+    """Startup progress and real subsystem readiness for loading-screen telemetry."""
+    status = startup_progress.get_status()
+    return JSONResponse(content=status)
+
 @app.get("/api/status")
 async def get_server_status():
     status = startup_progress.get_status()
@@ -148,6 +166,7 @@ app.mount("/resource", StaticFiles(directory="../frontend/dist/resource"), name=
 
 # Initialize Services
 start_time = time.time()
+startup_progress.get_subsystem("ai_services").start("Initializing voice, memory, TTS...")
 startup_progress.show_step("Loading AI Services")
 voice_input:VoiceInput = VoiceInput()
 llm:LLM = LLM()
@@ -156,6 +175,15 @@ history_store:HistoryStore = HistoryStore()
 tts:TTS = TTS()
 vision_input:VisionInput = VisionInput()
 character_manager:CharacterManager = CharacterManager()
+startup_progress.get_subsystem("ai_services").complete(f"Loaded in {time.time() - start_time:.2f}s")
+if voice_input.stt_available:
+    startup_progress.get_subsystem("stt").complete("Microphone & Faster-Whisper ready")
+else:
+    startup_progress.get_subsystem("stt").degrade("STT initialized with fallback")
+if tts.provider == "kokoro" and getattr(tts, "kokoro", None) is not None:
+    startup_progress.get_subsystem("tts").complete("Kokoro 54V ONNX loaded")
+else:
+    startup_progress.get_subsystem("tts").complete(f"Active provider: {tts.provider}")
 startup_progress.complete_step(f"AI Services loaded in {time.time() - start_time:.2f}s")
 
 clients = set()
@@ -244,17 +272,28 @@ async def run_startup_health_check() -> dict:
         ollama_reachable = False
         models = []
     report["ollama_reachable"] = ollama_reachable
+    if ollama_reachable:
+        startup_progress.get_subsystem("ollama").complete("Ollama daemon connected")
+    else:
+        startup_progress.get_subsystem("ollama").fail("Ollama unreachable on :11434")
     logger.info(f"  [1/6] Ollama Service: {'HEALTHY (online)' if ollama_reachable else 'FAIL (unreachable)'}")
 
     # 2. gemma4:e2b loaded/available
     gemma_available = any("gemma4:e2b" in m for m in models)
     report["gemma4_e2b_available"] = gemma_available
+    if gemma_available:
+        startup_progress.get_subsystem("model").complete("gemma4:e2b verified")
+    else:
+        startup_progress.get_subsystem("model").degrade("gemma4:e2b not found, using fallback")
     logger.info(f"  [2/6] gemma4:e2b Model: {'HEALTHY (available)' if gemma_available else 'FAIL (not found in ollama list)'}")
 
     # 3. Kokoro TTS ready
     tts_ready = False
     try:
         tts_ready = (tts.provider == "kokoro" and getattr(tts, "kokoro", None) is not None)
+        if not tts_ready and tts.provider == "kokoro":
+            # Engine available check
+            tts_ready = getattr(tts._engine, "available", False)
     except Exception:
         pass
     report["kokoro_tts_ready"] = tts_ready
@@ -1454,12 +1493,25 @@ class SettingsManager:
                     voice_input.input_mode = clean_mode
                     logger.info(f"[Settings] VoiceInput input_mode set to '{clean_mode}'")
 
+        # In demo mode, ensure settings lock to Kokoro and af_heart
+        try:
+            from demo_safety import is_demo_mode_active
+            demo_mode_active = is_demo_mode_active()
+        except Exception:
+            demo_mode_active = False
+
+        if demo_mode_active:
+            self.settings["tts.provider"] = "kokoro"
+            if self.settings.get("tts.voice") not in ("af_heart", "am_adam", "af_bella", "af_alloy"):
+                self.settings["tts.voice"] = "af_heart"
+            settings_items = list(self.settings.items())
+
         # Apply TTS provider FIRST, then voice — order matters so voice is set on the correct engine
         for key, value in settings_items:
             if key == "tts.provider":
                 try:
-                    tts.set_provider(value)
-                    logger.info(f"[Settings] TTS provider set to '{value}'")
+                    tts.set_provider("kokoro" if demo_mode_active else value)
+                    logger.info(f"[Settings] TTS provider set to '{'kokoro' if demo_mode_active else value}'")
                 except ValueError as e:
                     logger.warning(f"Saved TTS provider '{value}' is invalid: {e}")
 
@@ -1518,8 +1570,10 @@ settings_manager = SettingsManager(SETTINGS_FILE)
 
 # Apply settings on startup
 start_time = time.time()
+startup_progress.get_subsystem("settings").start("Applying persisted settings...")
 startup_progress.show_step("Applying Settings")
 settings_manager.apply_settings()
+startup_progress.get_subsystem("settings").complete("Persisted settings active")
 startup_progress.complete_step(f"Settings applied in {time.time() - start_time:.2f}s")
 
 # Warm up TTS to reduce first request latency
