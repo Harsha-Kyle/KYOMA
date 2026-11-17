@@ -300,7 +300,7 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 2000);
 
-        const res = await fetch("/api/status", {
+        const res = await fetch("/api/startup/status", {
           signal: controller.signal,
           headers: { "Cache-Control": "no-cache" },
         });
@@ -395,25 +395,44 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
             setSystemStateText(data.message?.toUpperCase() || "STARTING REASONING DAEMON...");
             if (data.message) addLog(`>>> ${data.message}`);
 
-            setSubsystems((prev) => [
-              { ...prev[0], status: "ONLINE", metric: "PORT 8000 // ONLINE" },
+            const sMap = data.subsystems || {};
+            setSubsystems([
               {
-                ...prev[1],
-                status: data.step >= 2 ? "ONLINE" : "INITIALIZING",
-                metric: data.step >= 2 ? "NEURAL POOL ACTIVE" : "STARTING OLLAMA...",
+                tag: "CORE-01",
+                name: "FASTAPI KERNEL",
+                metric: sMap.imports?.status === "ready" ? `MODULES (${sMap.imports.elapsed_s || 0}s)` : "PORT 8000 // READY",
+                status: sMap.imports?.status === "ready" ? "ONLINE" : "INITIALIZING",
               },
               {
-                ...prev[2],
-                status: data.step >= 3 ? "ONLINE" : "INITIALIZING",
-                metric: data.step >= 3 ? "QDRANT ACTIVE" : "EMBEDDING VECTOR...",
+                tag: "NEUR-02",
+                name: "COGNITIVE SYNAPSE",
+                metric: sMap.model?.status === "ready" ? "GEMMA 4:E2B READY" : (sMap.ollama?.status === "ready" ? "OLLAMA CONNECTED" : "STARTING OLLAMA..."),
+                status: sMap.model?.status === "ready" || sMap.ollama?.status === "ready" ? "ONLINE" : "INITIALIZING",
               },
               {
-                ...prev[3],
-                status: data.step >= 4 ? "ONLINE" : "INITIALIZING",
-                metric: data.step >= 4 ? "KOKORO 54V ONLINE" : "ONNX WARMUP...",
+                tag: "VECT-03",
+                name: "VECTOR MEMORY",
+                metric: sMap.ai_services?.status === "ready" ? "MEMORY PIPELINE OK" : "INITIALIZING PIPELINE...",
+                status: sMap.ai_services?.status === "ready" ? "ONLINE" : "INITIALIZING",
               },
-              { ...prev[4], status: data.step >= 2 ? "ONLINE" : "STANDBY", metric: "16KHZ AUDIO PIPE" },
-              { ...prev[5], status: "ONLINE", metric: `RATIO ${TARGET_WORLDLINE}` },
+              {
+                tag: "ACOU-04",
+                name: "ACOUSTIC ENGINE",
+                metric: sMap.tts?.status === "ready" ? "KOKORO 54V ONNX READY" : "INITIALIZING TTS...",
+                status: sMap.tts?.status === "ready" ? "ONLINE" : "INITIALIZING",
+              },
+              {
+                tag: "RECP-05",
+                name: "AUDITORY RECEPTOR",
+                metric: sMap.stt?.status === "ready" ? "FASTER-WHISPER READY" : (sMap.stt?.detail || "WHISPER 16KHZ STREAM"),
+                status: sMap.stt?.status === "ready" ? "ONLINE" : (sMap.stt?.status === "degraded" ? "ONLINE" : "INITIALIZING"),
+              },
+              {
+                tag: "DIVR-06",
+                name: "DIVERGENCE METER",
+                metric: `RATIO ${TARGET_WORLDLINE}`,
+                status: "ONLINE",
+              },
             ]);
           }
         }
