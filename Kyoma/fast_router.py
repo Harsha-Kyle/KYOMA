@@ -45,7 +45,7 @@ def _get_tools() -> dict:
         return _tools
     from volume_control   import set_volume, change_volume, mute_volume, unmute_volume, get_volume
     from display_control  import set_brightness, get_brightness, brightness_up, brightness_down, lock_screen
-    from media_control    import play_pause, play, pause, next_track, previous_track, startfrombegin_track
+    from media_control    import play_pause, play, pause, stop, next_track, previous_track, startfrombegin_track
     from screenshot       import take_screenshot_save
     from system_info_utils import (get_time, get_date, get_battery, get_system_info,
                                    get_power_status, get_network_status, get_vpn_status,
@@ -70,6 +70,7 @@ def _get_tools() -> dict:
         "play_pause":          play_pause,
         "play":                play,
         "pause":               pause,
+        "stop":                stop,
         "next_track":          next_track,
         "previous_track":      previous_track,
         "startfrombegin_track":startfrombegin_track,
@@ -169,6 +170,7 @@ _R: dict[str, list[str]] = {
     "screenshot":      ["Screenshot saved!",  "Got it — screenshot taken.", "Captured and saved."],
     "play":            ["Playing.",           "Resumed.",                  "Playing."],
     "pause":           ["Paused.",            "Paused.",                   "Paused."],
+    "stop":            ["Stopped.",           "Stopped.",                  "Stopped."],
     "play_pause":      ["Done.",              "Playback updated."],
     "next_track":      ["Next track.",        "Skipping ahead.",           "Playing the next one."],
     "prev_track":      ["Previous track.",    "Going back one.",           "Playing the previous one."],
@@ -527,6 +529,9 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
     # ── MEDIA ─────────────────────────────────────────────────────────────────
 
     if _RE_PAUSE.search(text):
+        if re.search(r"\bstop\b", text, re.I):
+            res = t["stop"]()
+            return _say("stop") if res == "Stopped." else res, True
         res = t["pause"]()
         return _say("pause") if res == "Paused." else res, True
 

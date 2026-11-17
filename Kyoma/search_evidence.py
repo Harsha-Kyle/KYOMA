@@ -58,8 +58,9 @@ def search_web_evidence(query: str, max_results: int = 3) -> dict:
             hits = w_resp.json().get('query', {}).get('search', [])
             top_hit_title = hits[0].get('title', '') if hits else ''
             
-            # Retrieve page extract for top hit if available to give rich, factual sentences
+            # Retrieve page extract and infobox incumbent for top hit if available
             top_extract = ""
+            incumbent_fact = ""
             if top_hit_title:
                 try:
                     ext_params = {
@@ -77,15 +78,32 @@ def search_web_evidence(query: str, max_results: int = 3) -> dict:
                         for pid, pdata in pages.items():
                             top_extract = pdata.get('extract', '').strip()
                             break
+                    
+                    # Also parse lead section wikitext for official infobox incumbent
+                    parse_params = {
+                        'action': 'parse',
+                        'page': top_hit_title,
+                        'prop': 'wikitext',
+                        'section': 0,
+                        'format': 'json'
+                    }
+                    p_resp = requests.get(wiki_url, params=parse_params, headers={'User-Agent': 'KyomaAI/2.0'}, timeout=2.0)
+                    if p_resp.status_code == 200:
+                        wt = p_resp.json().get('parse', {}).get('wikitext', {}).get('*', '')
+                        m_inc = re.search(r'incumbent\s*=\s*\[\[([^\]\|]+)', wt, re.I)
+                        if m_inc:
+                            inc_name = m_inc.group(1).strip()
+                            incumbent_fact = f"Current Incumbent: {inc_name}."
                 except Exception:
                     pass
 
             for idx, hit in enumerate(hits[:3]):
                 title = hit.get('title', '')
                 snippet = re.sub(r'<[^<]+?>', '', html.unescape(hit.get('snippet', ''))).strip()
-                if idx == 0 and top_extract:
-                    # Enrich snippet with extract for the #1 authoritative match
-                    snippet = top_extract[:400]
+                if idx == 0 and (top_extract or incumbent_fact):
+                    # Enrich snippet with extract and verified incumbent for the #1 authoritative match
+                    base_snip = (incumbent_fact + " " if incumbent_fact else "") + (top_extract or snippet)
+                    snippet = base_snip[:450].strip()
                 pageid = hit.get('pageid', '')
                 results.append({
                     'title': f"{title} - Wikipedia",

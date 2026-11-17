@@ -8,6 +8,7 @@ import re
 VK_MEDIA_NEXT_TRACK = 0xB0
 VK_MEDIA_PREV_TRACK = 0xB1
 VK_MEDIA_PLAY_PAUSE = 0xB3
+VK_MEDIA_STOP = 0xB2
 
 def press_key(hexKeyCode):
     """Fallback keypress using Windows user32 keybd_event."""
@@ -144,3 +145,14 @@ def startfrombegin_track():
     """Restart the current media track from the beginning."""
     press_key(VK_MEDIA_PREV_TRACK)
     return "Playing from the beginning."
+
+def stop():
+    """Stop active media playback."""
+    res = _run_media_ps("stop")
+    raw = res.get("raw", "")
+    if "ALREADY_PAUSED" in raw:
+        return "Already stopped."
+    if "PAUSE_SUCCESS" in raw:
+        return "Stopped."
+    press_key(VK_MEDIA_STOP)
+    return "Stopped."
