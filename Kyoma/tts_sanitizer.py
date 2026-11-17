@@ -65,7 +65,7 @@ def sanitize_for_tts(text: str) -> str:
     # 2. Never speak raw local file paths or internal error details
     s = re.sub(r'[A-Za-z]:\\[^\s,]+|\/[^\s,]+\.[a-zA-Z0-9]+', '', s)
     s = re.sub(r'Traceback \(most recent call last\):.*', 'An error occurred.', s, flags=re.DOTALL)
-    s = re.sub(r'\{[^{}]*("ok"|"error"|"out")[^{}]*\}', '', s)
+    s = re.sub(r'\{[^{}]*[\'"](?:ok|error|out)[\'"][^{}]*\}', '', s)
 
     # 3. Remove Markdown code blocks first
     s = re.sub(r'```.*?```', '', s, flags=re.DOTALL)
