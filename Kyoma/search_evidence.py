@@ -52,11 +52,24 @@ def search_web_evidence(query: str, max_results: int = 3) -> dict:
     # 2. Source: Wikipedia API for authoritative definitions, current officeholders & profiles
     try:
         wiki_url = 'https://en.wikipedia.org/w/api.php'
-        p = {'action': 'query', 'list': 'search', 'srsearch': cleaned_query, 'format': 'json', 'utf8': 1}
+        # Strip conversational question framing for Wikipedia article lookup
+        wiki_query = re.sub(r'^(?:who|what|where|when|why|how)\s+(?:is|are|was|were)\s+(?:the\s+)?', '', cleaned_query, flags=re.I)
+        wiki_query = re.sub(r'[\?\!\.]+$', '', wiki_query).strip() or cleaned_query
+
+        p = {'action': 'query', 'list': 'search', 'srsearch': wiki_query, 'format': 'json', 'utf8': 1}
         w_resp = requests.get(wiki_url, params=p, headers={'User-Agent': 'KyomaAI/2.0'}, timeout=3.5)
         if w_resp.status_code == 200:
             hits = w_resp.json().get('query', {}).get('search', [])
-            top_hit_title = hits[0].get('title', '') if hits else ''
+            
+            # Check the top hit, or if top hit is a "List of..." page, prefer the direct office page if in hits
+            target_hit = hits[0] if hits else None
+            for h in hits[:4]:
+                h_title = h.get('title', '')
+                if not h_title.lower().startswith('list of ') and ('minister' in h_title.lower() or 'president' in h_title.lower()):
+                    target_hit = h
+                    break
+            
+            top_hit_title = target_hit.get('title', '') if target_hit else (hits[0].get('title', '') if hits else '')
             
             # Retrieve page extract and infobox incumbent for top hit if available
             top_extract = ""
@@ -100,8 +113,8 @@ def search_web_evidence(query: str, max_results: int = 3) -> dict:
             for idx, hit in enumerate(hits[:3]):
                 title = hit.get('title', '')
                 snippet = re.sub(r'<[^<]+?>', '', html.unescape(hit.get('snippet', ''))).strip()
-                if idx == 0 and (top_extract or incumbent_fact):
-                    # Enrich snippet with extract and verified incumbent for the #1 authoritative match
+                if (title == top_hit_title or idx == 0) and (top_extract or incumbent_fact):
+                    # Enrich snippet with extract and verified incumbent for the authoritative match
                     base_snip = (incumbent_fact + " " if incumbent_fact else "") + (top_extract or snippet)
                     snippet = base_snip[:450].strip()
                 pageid = hit.get('pageid', '')
