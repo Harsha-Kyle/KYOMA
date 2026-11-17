@@ -18,8 +18,8 @@ from ..lib.LAV_logger import logger
 # and possessive artifacts like "kyoma's".
 # ---------------------------------------------------------------------------
 WAKE_WORD_PATTERN = re.compile(
-    r"\b(?:hey|hi|ok|okay)\s+(?:kyoma|coma|koma|kioma|keoma)\b|"
-    r"\b(?:kyoma|kioma|keoma)(?:'s)?\b",
+    r"\b(?:hey|hi|ok|okay|hello|your|you're)\s+(?:kyoma|kiyoma|kioma|kyomah|coma|koma|keoma)\b|"
+    r"\b(?:kyoma|kiyoma|kioma|kyomah|keoma)(?:'s)?\b",
     re.IGNORECASE,
 )
 
@@ -90,6 +90,7 @@ class VoiceInput:
     SILENCE_WAIT_TIME = 0.1 * SAMPLING_RATE   # original 0.1 s (kept as class attr)
     PRE_SPEECH_SAMPLES = 0.5 * SAMPLING_RATE
     POST_SPEECH_SAMPLES = 0.5 * SAMPLING_RATE
+    MAX_UTTERANCE_SAMPLES = 15.0 * SAMPLING_RATE  # 15s max segment to prevent background audio accumulation
 
     running = False
 
@@ -285,9 +286,11 @@ class VoiceInput:
                 if chunk_peak > self._utt_peak:
                     self._utt_peak = chunk_peak
 
-            if self.started_speaking and self.silent_samples > _silence_samples:
-                post = self.tmp_audio_buffer[:int(self.POST_SPEECH_SAMPLES)]
-                self.sentence_audio_buffer.extend(post)
+            is_max_len = len(self.sentence_audio_buffer) >= self.MAX_UTTERANCE_SAMPLES
+            if self.started_speaking and (self.silent_samples > _silence_samples or is_max_len):
+                if not is_max_len:
+                    post = self.tmp_audio_buffer[:int(self.POST_SPEECH_SAMPLES)]
+                    self.sentence_audio_buffer.extend(post)
 
                 async with self.processing_lock:
                     if self.transcription_in_flight:
@@ -514,23 +517,25 @@ class VoiceInput:
         if not transcribed_text:
             return None
 
-        # Conservative hallucination thresholds (faster-whisper metadata).
-        # avg_logprob < -1.0: very low confidence (hallucinations typically -1.2 to -2.0)
-        # no_speech_prob > 0.6: Whisper itself thinks this segment has no real speech
+        # Confidence-aware thresholds: relaxed when likely wake phrase is detected
+        has_wake = bool(WAKE_WORD_PATTERN.search(transcribed_text))
+        min_logprob = -1.45 if has_wake else -1.0
+        max_no_speech = 0.75 if has_wake else 0.60
+
         if all_avg_logprob:
             mean_logprob = sum(all_avg_logprob) / len(all_avg_logprob)
-            if mean_logprob < -1.0:
+            if mean_logprob < min_logprob:
                 logger.info(
                     f"[Whisper] Rejected low-confidence transcript "
-                    f"(avg_logprob={mean_logprob:.3f} < -1.0): {transcribed_text!r}"
+                    f"(avg_logprob={mean_logprob:.3f} < {min_logprob}): {transcribed_text!r}"
                 )
                 return None
         if all_no_speech_prob:
             mean_no_speech = sum(all_no_speech_prob) / len(all_no_speech_prob)
-            if mean_no_speech > 0.6:
+            if mean_no_speech > max_no_speech:
                 logger.info(
                     f"[Whisper] Rejected no-speech transcript "
-                    f"(no_speech_prob={mean_no_speech:.3f} > 0.6): {transcribed_text!r}"
+                    f"(no_speech_prob={mean_no_speech:.3f} > {max_no_speech}): {transcribed_text!r}"
                 )
                 return None
 
@@ -593,9 +598,11 @@ class VoiceInput:
                 if chunk_peak > self._utt_peak:
                     self._utt_peak = chunk_peak
 
-            if self.started_speaking and self.silent_samples > _silence_samples:
-                post = self.tmp_audio_buffer[:int(self.POST_SPEECH_SAMPLES)]
-                self.sentence_audio_buffer.extend(post)
+            is_max_len = len(self.sentence_audio_buffer) >= self.MAX_UTTERANCE_SAMPLES
+            if self.started_speaking and (self.silent_samples > _silence_samples or is_max_len):
+                if not is_max_len:
+                    post = self.tmp_audio_buffer[:int(self.POST_SPEECH_SAMPLES)]
+                    self.sentence_audio_buffer.extend(post)
 
                 # ── Per-utterance diagnostics ──────────────────────────────
                 if self._utt_probs:

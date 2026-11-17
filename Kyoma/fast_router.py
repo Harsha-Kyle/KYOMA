@@ -45,7 +45,7 @@ def _get_tools() -> dict:
         return _tools
     from volume_control   import set_volume, change_volume, mute_volume, unmute_volume, get_volume
     from display_control  import set_brightness, get_brightness, brightness_up, brightness_down, lock_screen
-    from media_control    import play_pause, next_track, previous_track, startfrombegin_track
+    from media_control    import play_pause, play, pause, next_track, previous_track, startfrombegin_track
     from screenshot       import take_screenshot_save
     from system_info_utils import (get_time, get_date, get_battery, get_system_info,
                                    get_power_status, get_network_status, get_vpn_status,
@@ -68,6 +68,8 @@ def _get_tools() -> dict:
         "lock_screen":         lock_screen,
         # Media
         "play_pause":          play_pause,
+        "play":                play,
+        "pause":               pause,
         "next_track":          next_track,
         "previous_track":      previous_track,
         "startfrombegin_track":startfrombegin_track,
@@ -165,10 +167,12 @@ _R: dict[str, list[str]] = {
     "get_brightness":  ["{r}"],
     "lock":            ["Locking the screen.", "Screen locked.",           "Locked up."],
     "screenshot":      ["Screenshot saved!",  "Got it — screenshot taken.", "Captured and saved."],
-    "play_pause":      ["Done.",              "Toggled playback.",         "Played/paused."],
-    "next_track":      ["Next track!",        "Skipping ahead.",           "Playing the next one."],
+    "play":            ["Playing.",           "Resumed.",                  "Playing."],
+    "pause":           ["Paused.",            "Paused.",                   "Paused."],
+    "play_pause":      ["Done.",              "Playback updated."],
+    "next_track":      ["Next track.",        "Skipping ahead.",           "Playing the next one."],
     "prev_track":      ["Previous track.",    "Going back one.",           "Playing the previous one."],
-    "restart_track":   ["Starting over.",     "Back to the beginning.",    "Restarting from the top."],
+    "restart_track":   ["Playing from the beginning.", "Back to the beginning.", "Restarting from the top."],
     "get_time":        ["{r}"],
     "get_date":        ["{r}"],
     "get_battery":     ["{r}"],
@@ -216,10 +220,12 @@ _RE_BRI_DN     = re.compile(r"\b(?:brightness\s+down|dimmer|dim\s+(?:(?:the\s+)?
 _RE_GET_BRI    = re.compile(r"\b(?:what(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?brightness|(?:check|get|current)\s+brightness|brightness\s+level)\b", _F)
 
 # ── Media ─────────────────────────────────────────────────────────────────────
-_RE_PLAY_PAUSE = re.compile(r"^(?:play|pause|toggle\s+(?:play|media|music|playback)|play\s*[/\\]\s*pause|resume(?:\s+(?:music|media|playback))?)$", _F)
-_RE_NEXT       = re.compile(r"\b(?:next\s+(?:track|song|music)|skip(?:\s+(?:this|track|song|music))?|forward(?:\s+track)?)\b", _F)
-_RE_PREV       = re.compile(r"\b(?:previous\s+(?:track|song|music)|prev(?:\s+(?:track|song|music))?|go\s+back(?:\s+(?:a\s+)?(?:track|song))?|last\s+(?:track|song))\b", _F)
-_RE_RESTART    = re.compile(r"\b(?:restart(?:\s+(?:track|song|music))?|replay(?:\s+(?:this|track|song|music))?|from\s+(?:the\s+)?(?:beginning|start)|start\s+(?:this\s+)?over|beginning\s+of\s+(?:track|song))\b", _F)
+_RE_PAUSE      = re.compile(r"^(?:pause(?:\s+(?:it|the\s+(?:video|song|music|track)|video|song|music|playback))?|stop(?:\s+(?:the\s+(?:video|song|music|track)|video|song|music|playback))?)$", _F)
+_RE_PLAY       = re.compile(r"^(?:play(?:\s+(?:it|the\s+(?:video|song|music|track)|video|song|music|playback))?|resume(?:\s+(?:it|the\s+(?:video|song|music|track)|video|song|music|playback))?|continue(?:\s+(?:the\s+(?:video|song|music|track)|video|song|music|playback))?)$", _F)
+_RE_PLAY_PAUSE = re.compile(r"^(?:toggle\s+(?:play|media|music|playback)|play\s*[/\\]\s*pause)$", _F)
+_RE_NEXT       = re.compile(r"\b(?:next(?:\s+(?:one|track|song|music))?|skip(?:\s+(?:this|one|track|song|music))?|forward(?:\s+track)?)\b", _F)
+_RE_PREV       = re.compile(r"\b(?:previous(?:\s+(?:one|track|song|music))?|prev(?:\s+(?:one|track|song|music))?|go\s+back(?:\s+(?:to\s+(?:the\s+)?previous\s+(?:track|song)|a\s+(?:track|song)))?|last\s+(?:track|song))\b", _F)
+_RE_RESTART    = re.compile(r"\b(?:restart(?:\s+(?:track|song|music))?|replay(?:\s+(?:this|track|song|music))?|from\s+(?:the\s+)?(?:beginning|start)|start\s+(?:this\s+)?over|play\s+(?:the\s+(?:song|video|track)\s+)?again|beginning\s+of\s+(?:track|song))\b", _F)
 
 # ── Screenshot & Lock ─────────────────────────────────────────────────────────
 _RE_SCREENSHOT = re.compile(r"\b(?:(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?|grab\s+(?:a\s+)?)?(?:screenshot|screen\s*shot|ss)(?:\s+(?:and\s+)?save\s+it\s+as\s+([a-zA-Z0-9_\-\s]+?))?(?:\s+(?:now|please))?|screen(?:\s+)?shot|screen\s+capture|screengrab|capture\s+screen|grab\s+screen)\b", _F)
@@ -228,7 +234,7 @@ _RE_REMINDERS  = re.compile(r"\b(?:(?:list|show|view|check|read|get)(?:\s+all)?(
 _RE_GREETING     = re.compile(r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening)|howdy|greetings)[\!\.\?\s]*$", _F)
 _RE_SAY_HI_TO    = re.compile(r"\b(?:say\s+(?:hi|hello)\s+to|greet)\s+([a-zA-Z\s]+)[\!\.\?\s]*$", _F)
 _RE_NAME         = re.compile(r"\b(?:what(?:'s|\s+is)\s+your\s+name|who\s+are\s+you|introduce\s+yourself)\b", _F)
-_RE_DOING        = re.compile(r"\b(?:what\s+are\s+you\s+doing|how\s+are\s+you(?:\s+doing)?|how's\s+it\s+going)\b", _F)
+_RE_DOING        = re.compile(r"^(?:what\s+are\s+you\s+doing|how\s+are\s+you(?:\s+doing)?|how's\s+it\s+going)[\!\.\?\s]*$", _F)
 _RE_THANKS       = re.compile(r"^(?:thanks|thank\s+you(?:\s+very\s+much|\s+so\s+much)?)[\!\.\?\s]*$", _F)
 _RE_BYE          = re.compile(r"^(?:bye|goodbye|see\s+you(?:\s+later)?|farewell|exit)[\!\.\?\s]*$", _F)
 _RE_OPEN_BARE    = re.compile(r"^(?:open|launch|start)[\!\.\?\s]*$", _F)
@@ -242,15 +248,15 @@ _WORD_TO_NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, 
 # Direct reminder parsing: "remind me to X in N minutes/hours" or "set a reminder in N minutes/hours to X"
 # Also supports "saying", "that says", and Whisper mishearing "remaining" for "reminder"
 _RE_REMIND_IN_SAYING = re.compile(
-    r"\b(?:set\s+(?:a\s+)?)?(?:reminder|remaining)\s+in\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)\s+(?:saying|that\s+says?)\s+(.+?)[\.\?\!]*$", _F)
+    r"\b(?:set\s+(?:a\s+)?)?(?:reminder|remaining)\s+(?:in|and|after)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)\s+(?:saying|that\s+says?)\s+(.+?)[\.\?\!]*$", _F)
 _RE_REMIND_ME_IN = re.compile(
-    r"\b(?:remind|remaining)\s+(?:me\s+)?in\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)\s+(?:to|that\s+says?|saying)\s+(.+?)[\.\?\!]*$", _F)
+    r"\b(?:remind|remaining)\s+(?:me\s+)?(?:in|and|after)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)\s+(?:to|that\s+says?|saying)\s+(.+?)[\.\?\!]*$", _F)
 _RE_REMIND_FOR_TIME = re.compile(
     r"\b(?:set\s+(?:a\s+)?)?(?:reminder|remaining)\s+(?:for|at)\s+(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))\s+(?:saying|that\s+says?|to)\s+(.+?)[\.\?\!]*$", _F)
 _RE_REMIND_IN_TO = re.compile(
-    r"\b(?:set\s+(?:a\s+)?)?(?:reminder|remaining)\s+in\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)\s+to\s+(.+?)[\.\?\!]*$", _F)
+    r"\b(?:set\s+(?:a\s+)?)?(?:reminder|remaining)\s+(?:in|and|after)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)\s+to\s+(.+?)[\.\?\!]*$", _F)
 _RE_REMIND_TO_IN = re.compile(
-    r"\b(?:remind|remaining)\s+(?:me\s+)?to\s+(.+?)\s+in\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)[\.\?\!]*$", _F)
+    r"\b(?:remind|remaining)\s+(?:me\s+)?to\s+(.+?)\s+(?:in|and|after)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)[\.\?\!]*$", _F)
 
 
 
@@ -286,7 +292,7 @@ _RE_CLOSE      = re.compile(rf"\b{_CLOSE_WORDS}\s+(?:the\s+)?(.+?){_APP_SUFFIX}"
 _RE_MINIMIZE   = re.compile(rf"\b{_MIN_WORDS}\s+(?:the\s+)?(.+?){_APP_SUFFIX}", _F)
 _RE_RESTORE    = re.compile(rf"\b{_REST_WORDS}\s+(?:the\s+)?(.+?){_APP_SUFFIX}", _F)
 _RE_OPEN_SITE  = re.compile(rf"\b{_BROWSE_WORDS}\s+(?:the\s+)?(.+?)(?:\s+(?:website|site|page|in\s+(?:browser|chrome|edge|firefox)))?{_APP_SUFFIX}", _F)
-_RE_OPEN_APP   = re.compile(rf"\b{_OPEN_WORDS}\s+(?:the\s+)?(.+?){_APP_SUFFIX}", _F)
+_RE_OPEN_APP   = re.compile(rf"^{_OPEN_WORDS}\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?){_APP_SUFFIX}$", _F)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -306,11 +312,15 @@ def _extract_result(raw) -> str:
 
 def _is_plausible_name(name: str) -> bool:
     """Reject match groups that are obviously not an app/site name."""
-    if not name or len(name) > 50:
+    if not name or len(name) > 40:
         return False
+    n = name.lower().strip()
     # Reject lone function words
-    noise = {"it", "that", "this", "the", "a", "an", "them", "me", "us"}
-    if name.lower() in noise:
+    noise = {"it", "that", "this", "the", "a", "an", "them", "me", "us", "something", "anything"}
+    if n in noise:
+        return False
+    # Reject multi-sentence or conjunction-ridden strings
+    if re.search(r"\b(?:and|then|also|with|about|tell|story|joke|help)\b", n):
         return False
     return True
 
@@ -516,8 +526,16 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
 
     # ── MEDIA ─────────────────────────────────────────────────────────────────
 
+    if _RE_PAUSE.search(text):
+        res = t["pause"]()
+        return _say("pause") if res == "Paused." else res, True
+
+    if _RE_PLAY.search(text):
+        res = t["play"]()
+        return _say("play") if res == "Playing." else res, True
+
     if _RE_PLAY_PAUSE.search(text):
-        t["play_pause"]()
+        res = t["play_pause"]()
         return _say("play_pause"), True
 
     if _RE_NEXT.search(text):
@@ -537,8 +555,9 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
     if m := _RE_SCREENSHOT.search(text):
         name = m.group(1).strip() if m.group(1) else None
         res = t["take_screenshot_save"](name=name) if name else t["take_screenshot_save"]()
-        r = _extract_result(res)
-        return r, True
+        if name:
+            return f"Screenshot saved as {name}.", True
+        return "Screenshot saved.", True
 
     if _RE_LOCK.search(text):
         is_refused, refusal = check_demo_mode_refusal("lock_screen")
@@ -581,8 +600,8 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         unit = m.group(2).lower()
         action = m.group(3).strip()
         time_str = f"in {num} {unit}"
-        t["add_reminder"](title=action, message=action, remind_time=time_str)
-        return f"Reminder set. I'll remind you in {num} {unit} to {action}.", True
+        res = t["add_reminder"](title=action, message=action, remind_time=time_str)
+        return str(res), True
 
     if m := _RE_REMIND_ME_IN.search(text):
         raw_num = m.group(1).lower()
@@ -590,14 +609,14 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         unit = m.group(2).lower()
         action = m.group(3).strip()
         time_str = f"in {num} {unit}"
-        t["add_reminder"](title=action, message=action, remind_time=time_str)
-        return f"Reminder set. I'll remind you in {num} {unit} to {action}.", True
+        res = t["add_reminder"](title=action, message=action, remind_time=time_str)
+        return str(res), True
 
     if m := _RE_REMIND_FOR_TIME.search(text):
         time_val = m.group(1).strip()
         action = m.group(2).strip()
-        t["add_reminder"](title=action, message=action, remind_time=time_val)
-        return f"Reminder set for {time_val} to {action}.", True
+        res = t["add_reminder"](title=action, message=action, remind_time=time_val)
+        return str(res), True
 
     if m := _RE_REMIND_IN_TO.search(text):
         raw_num = m.group(1).lower()
@@ -605,8 +624,8 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         unit = m.group(2).lower()
         action = m.group(3).strip()
         time_str = f"in {num} {unit}"
-        t["add_reminder"](title=action, message=action, remind_time=time_str)
-        return f"Reminder set. I'll remind you in {num} {unit} to {action}.", True
+        res = t["add_reminder"](title=action, message=action, remind_time=time_str)
+        return str(res), True
 
     if m := _RE_REMIND_TO_IN.search(text):
         action = m.group(1).strip()
@@ -614,8 +633,8 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         num = str(_WORD_TO_NUM.get(raw_num, raw_num))
         unit = m.group(3).lower()
         time_str = f"in {num} {unit}"
-        t["add_reminder"](title=action, message=action, remind_time=time_str)
-        return f"Reminder set. I'll remind you in {num} {unit} to {action}.", True
+        res = t["add_reminder"](title=action, message=action, remind_time=time_str)
+        return str(res), True
 
     if _RE_REMINDERS.search(text):
         raw = t["list_active_reminders"]()
@@ -660,7 +679,7 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         return "Goodbye! Have a great day.", True
 
     if _RE_OPEN_BARE.match(text):
-        return "What would you like me to open?", True
+        return None, False
 
     if _RE_WHO.search(text):
         return "I'm KYOMA, your AI desktop companion.", True
@@ -866,10 +885,10 @@ def _test():
             _tools = {k: (lambda *a, **kw: "OK") for k in [
                 "set_volume","change_volume","mute_volume","unmute_volume",
                 "set_brightness","get_brightness","brightness_up","brightness_down","lock_screen",
-                "play_pause","next_track","previous_track","startfrombegin_track",
+                "play_pause","play","pause","next_track","previous_track","startfrombegin_track",
                 "take_screenshot_save","get_time","get_date","get_battery","get_system_info",
                 "get_power_status","get_network_status","get_vpn_status","get_performance","get_disk_usage",
-                "open_application","open_browser","minimize_application","restore_application","close_application",
+                "open_application","open_browser","minimize_application","restore_application","close_application","add_reminder","list_active_reminders",
             ]}
             _tools["get_volume"] = lambda *a, **kw: 50
             _, matched = route(text)
@@ -879,7 +898,7 @@ def _test():
             print(f"  EXCEPTION on '{text}': {ex}")
 
         ok = (matched == expect_match) if expect_match is not None else (not matched)
-        status = "✅" if ok else "❌"
+        status = "[PASS]" if ok else "[FAIL]"
         if ok:
             passed += 1
         else:

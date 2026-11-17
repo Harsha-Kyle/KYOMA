@@ -111,8 +111,8 @@ class KyomaLLM(BaseLLM):
             from ollama_workflow import is_search_query
             if is_search_query(text):
                 logger.info(f"[KyomaLLM] Search intent detected: {text!r}")
-                # Immediately yield spoken feedback (goes to TTS right away)
-                yield "Let me look that up."
+                # Immediately yield spoken feedback (goes to TTS right away with space)
+                yield "Let me look that up. "
                 # Broadcast thinking state to WebUI + ESP32 (non-blocking, best-effort)
                 _fire_state_broadcast("thinking")
                 # Fall through to full workflow which will now use the direct search path

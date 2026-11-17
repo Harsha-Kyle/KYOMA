@@ -230,9 +230,18 @@ def normalize_datetime(dt_str):
     if not dt_str:
         raise ValueError("Empty datetime string")
 
+    cleaned = dt_str.strip()
+    # Normalize common STT anomalies like 'and 1 minute', 'in 1 min'
+    cleaned = re.sub(r"^(?:and|after)\s+", "in ", cleaned, flags=re.IGNORECASE)
+
     # Try to parse with dateparser first (handles natural language)
-    parsed = dateparser.parse(dt_str, settings={'PREFER_DATES_FROM': 'future'})
+    parsed = dateparser.parse(cleaned, settings={'PREFER_DATES_FROM': 'future'})
     if parsed:
+        # If time is in the past for today, advance by 1 day
+        now = datetime.now()
+        if parsed <= now and (now - parsed).total_seconds() > 60:
+            # User specified a clock time that already passed today (e.g. 8 PM at 10 PM)
+            parsed += timedelta(days=1)
         return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
     # fallback to manual formats
@@ -245,23 +254,28 @@ def normalize_datetime(dt_str):
     ]
     for fmt in formats:
         try:
-            dt = datetime.strptime(dt_str, fmt)
+            dt = datetime.strptime(cleaned, fmt)
+            now = datetime.now()
+            if dt <= now and (now - dt).total_seconds() > 60:
+                dt += timedelta(days=1)
             return dt.strftime("%Y-%m-%d %H:%M:%S")
         except ValueError:
             continue
     raise ValueError(f"Unrecognized datetime format: {dt_str}")
 
 def parse_relative_time(time_str):
-    """Parse relative time strings like 'in 10 minutes', '2 hours', etc."""
+    """Parse relative time strings like 'in 10 minutes', 'and 1 minute', '2 hours', etc."""
     if not time_str:
         return None
-    parsed = dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future'})
+    cleaned = time_str.strip()
+    cleaned = re.sub(r"^(?:and|after)\s+", "in ", cleaned, flags=re.IGNORECASE)
+    parsed = dateparser.parse(cleaned, settings={'PREFER_DATES_FROM': 'future'})
     if parsed:
         return parsed
 
     # fallback regex if still not parsed
-    time_str = time_str.lower().strip()
-    match = re.match(r"(\d+)\s*(sec|secs|second|seconds|min|mins|minute|minutes|hour|hours|hr|hrs|day|days)", time_str)
+    cleaned_lower = cleaned.lower().strip()
+    match = re.match(r"(?:in\s+)?(\d+)\s*(sec|secs|second|seconds|min|mins|minute|minutes|hour|hours|hr|hrs|day|days)", cleaned_lower)
     if not match:
         return None
 
@@ -282,6 +296,12 @@ def parse_relative_time(time_str):
 # ----------------------
 # DATABASE FUNCTIONS
 # ----------------------
+def _format_reminder_response(title: str, remind_time_str: str, recurrence: str = None) -> str:
+    """Format a clean, natural confirmation for reminders, never exposing dicts or IDs."""
+    nat_time = _format_natural_time(remind_time_str)
+    rec_text = f" repeating {recurrence}" if recurrence and recurrence.lower() not in ("one time", "one-time", "none", "") else ""
+    return f"Reminder set for {title} {nat_time}{rec_text}."
+
 def add_reminder(title: str, message: str, remind_time: str, recurrence: str = None):
     """
     Add a new reminder to the database and schedule it.
@@ -337,8 +357,8 @@ def add_reminder(title: str, message: str, remind_time: str, recurrence: str = N
     }
 
     schedule_reminder(reminder)
-    log_event(f"🗓️ [Scheduled              ] reminder : '{title}' at {normalized_time} (recurrence: {recurrence})")
-    return reminder
+    log_event(f"🗓️ [Scheduled              ] reminder : '{clean_title}' at {normalized_time} (recurrence: {recurrence})")
+    return _format_reminder_response(clean_title, normalized_time, recurrence)
 
 def get_active_reminders():
     conn = sqlite3.connect(DB_PATH)
@@ -404,6 +424,16 @@ def show_toast(title, message, callback=None):
         print(f"⚠️ Toast notification error: {e}")
 
 def trigger_reminder(title, message, reminder_id, repeat_interval=None):
+    # Atomic transition: only ONE worker can claim and fire a pending reminder
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE reminders SET status='fired' WHERE id=? AND status='pending'", (reminder_id,))
+    if c.rowcount == 0:
+        conn.close()
+        return  # Already claimed or cancelled
+    conn.commit()
+    conn.close()
+
     clicked = {"done": False}
 
     def on_click():
@@ -422,19 +452,33 @@ def trigger_reminder(title, message, reminder_id, repeat_interval=None):
     spoken_text = f"Reminder: {title}. {message}" if message and message != title else f"Reminder: {title}."
     _speak_reminder(spoken_text)
 
-    # Show the reminder toast
+    # Show the reminder toast via winotify (native Windows action center) with win10toast fallback
+    toast_shown = False
     try:
-        toaster.show_toast(
-            f"Reminder: {title}",
-            message or "Reminder!",
-            icon_path=None,
-            duration=10,
-            threaded=True,
-            callback_on_click=on_click
+        from winotify import Notification, audio
+        toast = Notification(
+            app_id="Kyoma.Assistant",
+            title=f"Reminder: {title}",
+            msg=message or "Reminder!",
+            duration="short"
         )
-    except Exception as e:
-        log_event(f"⚠️ [Toast Error            ] trigger_reminder failed for '{title}': {e}")
-        print(f"⚠️ Toast error for reminder '{title}': {e}")
+        toast.set_audio(audio.Default, loop=False)
+        toast.show()
+        toast_shown = True
+    except Exception as notif_err:
+        log_event(f"⚠️ [Winotify Error         ] {notif_err}")
+
+    if not toast_shown:
+        try:
+            toaster.show_toast(
+                f"Reminder: {title}",
+                message or "Reminder!",
+                icon_path=None,
+                duration=10,
+                threaded=False
+            )
+        except Exception as e:
+            log_event(f"⚠️ [Toast Fallback Error   ] {e}")
 
     # Retry/snooze logic if not clicked within 60 seconds
     def retry_check():
@@ -681,9 +725,13 @@ def load_and_schedule_all():
         else:
             schedule_reminder(r)
 
+_scheduler_initialized = False
+
 def start_scheduler():
-    if getattr(scheduler, "running", False):
+    global _scheduler_initialized
+    if _scheduler_initialized or getattr(scheduler, "running", False):
         return
+    _scheduler_initialized = True
     scheduler.start()
     print("✅ Reminder scheduler started")
     load_and_schedule_all()
