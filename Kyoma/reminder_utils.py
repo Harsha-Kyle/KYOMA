@@ -411,17 +411,28 @@ def get_reminder_by_id(reminder_id):
 # ----------------------
 def show_toast(title, message, callback=None):
     try:
-        toaster.show_toast(
+        from winotify import Notification, audio
+        toast = Notification(
+            app_id="KYOMA AI Assistant",
             title=title,
             msg=message,
-            icon_path=None,
-            duration=10,
-            threaded=True,
-            callback_on_click=callback
+            duration="short"
         )
+        toast.set_audio(audio.Default, loop=False)
+        toast.show()
     except Exception as e:
-        log_event(f"⚠️ [Toast Error            ] failed to show toast: {e}")
-        print(f"⚠️ Toast notification error: {e}")
+        try:
+            toaster.show_toast(
+                title=title,
+                msg=message,
+                icon_path=None,
+                duration=5,
+                threaded=True
+            )
+        except Exception:
+            pass
+        log_event(f"⚠️ [Toast Error            ] toast notice: {e}")
+        print(f"⚠️ Toast notification: {e}")
 
 def trigger_reminder(title, message, reminder_id, repeat_interval=None):
     # Atomic transition: only ONE worker can claim and fire a pending reminder
