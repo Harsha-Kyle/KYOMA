@@ -1,3 +1,5 @@
+import sys
+import os
 from services.lib.LAV_logger import logger
 from .Kokoro.KokoroTTS import KokoroTTS
 
@@ -38,8 +40,26 @@ class TTS:
         except Exception as e:
             logger.warning(f"[TTS] Could not read saved provider from settings.json: {e}")
 
+        try:
+            kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Kyoma'))
+            if kyoma_path not in sys.path:
+                sys.path.append(kyoma_path)
+            from demo_safety import is_demo_mode_active
+            demo_mode = is_demo_mode_active()
+        except Exception:
+            demo_mode = False
+
+        if demo_mode:
+            saved_provider = 'kokoro'
+            logger.info('[TTS] Demo mode active at startup: locked to Kokoro TTS')
+
         self._active_provider: str = saved_provider
         self._engine: GptSovits | KokoroTTS = self._get_instance(saved_provider)
+        if demo_mode and hasattr(self._engine, 'change_voice'):
+            try:
+                self._engine.change_voice('af_heart')
+            except Exception:
+                pass
 
     @property
     def provider(self) -> str:
@@ -105,6 +125,14 @@ class TTS:
 
     def change_voice(self, voice_name: str) -> dict:
         """Change the current voice (active provider only)."""
+        available = self.get_available_voices()
+        if available and voice_name not in available:
+            logger.warning(f"[TTS] Voice '{voice_name}' not available for provider '{self._active_provider}'. Available: {available[:5]}...")
+            if self.current_voice in available:
+                return {"message": f"Voice '{voice_name}' not supported by current provider. Kept current voice '{self.current_voice}'."}
+            fallback = available[0]
+            res = self._engine.change_voice(fallback)
+            return {"message": f"Voice '{voice_name}' not supported. Defaulted to '{fallback}'."}
         return self._engine.change_voice(voice_name)
 
     def synthesize(self, text: str):
