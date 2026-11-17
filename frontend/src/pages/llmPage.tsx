@@ -23,7 +23,7 @@ function LLMPage() {
     }, [settings["llm.showMonitor"]]);
 
     return (
-        <div className="relative h-screen w-full overflow-hidden">
+        <div className="relative h-full w-full overflow-hidden">
             
             {showMonitor ? (
                 <div className="flex flex-row h-full justify-between">

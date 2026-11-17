@@ -49,27 +49,31 @@ function Mainpage() {
         <SidebarProvider open={false}>
             <AppSidebar onItemClick={setCurrentPage} activePage={currentPage} />
             <div className="flex flex-col w-full h-screen">
-                {/* Demo status bar */}
-                <div className="bg-muted/40 border-b px-4 py-1.5 flex items-center justify-between text-xs text-muted-foreground z-10">
-                    <div className="flex items-center space-x-3">
-                        <span className="font-semibold text-foreground">KYOMA Status:</span>
+                {/* Demo status bar - pinned outside scroll area */}
+                <header className="shrink-0 h-9 bg-muted/40 border-b px-4 flex items-center justify-between text-xs text-muted-foreground z-20 select-none">
+                    <div className="flex items-center space-x-3 shrink-0">
+                        <span className="font-semibold text-foreground tracking-wide">KYOMA Status:</span>
                         <span className="inline-flex items-center gap-1.5">
                             <span className={`h-2 w-2 rounded-full ${
                                 systemState === "LISTENING" ? "bg-green-500 animate-pulse" :
                                 systemState === "THINKING" ? "bg-amber-500 animate-pulse" :
                                 systemState === "SPEAKING" ? "bg-blue-500 animate-pulse" : "bg-gray-400"
                             }`} />
-                            <strong className="text-foreground">{systemState}</strong>
+                            <strong className="text-foreground font-mono">{systemState}</strong>
                         </span>
-                        <span>Mode: <span className="font-mono text-foreground font-semibold">{inputMode}</span></span>
+                        <span className="hidden sm:inline">Mode: <span className="font-mono text-foreground font-semibold">{inputMode}</span></span>
                     </div>
                     {(lastCommand || lastResponse) && (
-                        <div className="truncate max-w-xl text-right">
-                            {lastCommand && <span className="mr-2">Last: &ldquo;{lastCommand}&rdquo;</span>}
-                            {lastResponse && <span className="text-foreground font-medium">&rarr; &ldquo;{lastResponse.slice(0, 40)}...&rdquo;</span>}
+                        <div 
+                            className="truncate max-w-md md:max-w-xl text-right text-xs" 
+                            title={`${lastCommand ? `Command: ${lastCommand}` : ''}${lastResponse ? `
+Response: ${lastResponse}` : ''}`}
+                        >
+                            {lastCommand && <span className="mr-2 opacity-80">Last: &ldquo;{lastCommand}&rdquo;</span>}
+                            {lastResponse && <span className="text-foreground font-medium">&rarr; &ldquo;{lastResponse.length > 40 ? lastResponse.slice(0, 40) + '...' : lastResponse}&rdquo;</span>}
                         </div>
                     )}
-                </div>
+                </header>
                 <main className="flex-1 relative">
                     {Object.entries(pageMapping).map(([key, { page: PageComponent }]) => {
                         const isActive = currentPage === key;
