@@ -4,22 +4,15 @@ import { Button } from "@/components/ui/button"
 import { Square } from "lucide-react"
 import { globalStateManager } from "@/lib/globalStateManager"
 import { pipelineManager } from "@/lib/pipelineManager"
-import { ttsManager } from "@/lib/ttsManager"
-import { chatManager } from "@/lib/chatManager"
-import { apiFetch } from "@/lib/api-client"
+import { stopAll } from "@/lib/stopController"
 
 function InputPage() {
-    // Show Stop button whenever the system is thinking OR speaking —
-    // not just during TTS playback. This prevents the button from
-    // disappearing in the gaps between chunks.
     const [turnActive, setTurnActive] = useState<boolean>(false);
 
     useEffect(() => {
         const updateTurnState = () => {
             const thinking = globalStateManager.getState('isLLMThinking');
             const playing = globalStateManager.getState('isTTSPlaying');
-            // Turn is active if either thinking or playing, OR if there is a
-            // non-finished pipeline task (covers inter-chunk gaps)
             const task = pipelineManager.getCurrentTask();
             const hasActiveTask = !!task &&
                 task.status !== 'task_finished' &&
@@ -29,7 +22,6 @@ function InputPage() {
 
         const unsubTTS = globalStateManager.subscribe('isTTSPlaying', updateTurnState);
         const unsubLLM = globalStateManager.subscribe('isLLMThinking', updateTurnState);
-        // Also react to pipeline changes
         const unsubPipeline = pipelineManager.subscribe(updateTurnState);
 
         updateTurnState();
@@ -40,24 +32,13 @@ function InputPage() {
         };
     }, []);
 
-    // Turn ID guard: assign a new ID when Stop is pressed so that any
-    // in-flight async callbacks (TTS fetch completions, audio onended) know
-    // they belong to a cancelled turn and must not trigger unmute or further
-    // pipeline state changes.
     const handleStop = () => {
-        ttsManager.stopAllAudio();
-        chatManager.stopGeneration();
-        pipelineManager.cancelAllTasks();
-        pipelineManager.interruptCurrentTask();
-        // Unmute exactly once after all queued audio and pending TTS are cleared
-        apiFetch('/api/record/unmute', { method: 'POST' }).catch(() => {});
-        globalStateManager.updateState('isTTSPlaying', false);
-        globalStateManager.updateState('isLLMThinking', false);
+        stopAll().catch(() => {});
         setTurnActive(false);
     };
 
     return (
-        <div className="p-5">
+        <div className="h-full overflow-y-auto p-5">
             {turnActive && (
                 <div className="flex justify-center mb-4">
                     <Button
@@ -75,5 +56,4 @@ function InputPage() {
     )
 }
 
-  
-  export default InputPage
+export default InputPage

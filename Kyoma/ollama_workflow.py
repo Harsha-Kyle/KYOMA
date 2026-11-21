@@ -17,19 +17,21 @@ from search_evidence import search_web_evidence
 _SEARCH_INTENT_PATTERNS = [
     # Explicit "who is / who was" factual look-ups
     re.compile(r"^\bwho\s+(?:is|was|are|were)\b", re.IGNORECASE),
+    # Officeholder / administrative queries (e.g. "CM in Tamil Nadu?", "PM of India", "CEO of Google")
+    re.compile(r"\b(?:CM|PM|CEO|CFO|CTO|COO|Governor|President|Chief\s+Minister|Prime\s+Minister|Mayor)\s+(?:of|in|for)\b", re.IGNORECASE),
     # "What is the current X" / "current one" / follow-up queries
     re.compile(r"\b(?:what(?:'s|\s+is)\s+the\s+current|current\s+(?:prime\s+minister|president|ceo|chief\s+minister|leader|news|one)|who\s+is\s+the\s+current)\b", re.IGNORECASE),
     # Explicit search commands and variants
     re.compile(r"\b(?:search\s+(?:for\s+)?|google\s+(?:search\s+|for\s+)?|look\s+up|look\s+it\s+up)\b", re.IGNORECASE),
     re.compile(r"\b(?:can\s+you\s+search|please\s+search|kyoma[\s,]+search)\b", re.IGNORECASE),
     # "latest X" / "recent X" / "news about X" — factual time-sensitive
-    re.compile(r"\b(?:latest|recent|news\s+about|current\s+news)\b", re.IGNORECASE),
+    re.compile(r"\b(?:latest|recent|news\s+about|current\s+news|weather\s+in|weather\s+of|weather\s+for|weather|what(?:'s|\s+is)\s+up\s+on)\b", re.IGNORECASE),
     # "what happened to/with" — news-type query
     re.compile(r"\bwhat\s+happened\s+(?:to|with)\b", re.IGNORECASE),
     # "find out X"
     re.compile(r"\bfind\s+out\b", re.IGNORECASE),
     # "tell me about X" followed by a named entity (person/place/thing) — only when clearly factual
-    re.compile(r"\btell\s+me\s+about\s+\w[\w\s]{2,30}$", re.IGNORECASE),
+    re.compile(r"\btell\s+me\s+about\s+(?!yourself\b|you\b|kyoma\b)\w[\w\s]{2,30}$", re.IGNORECASE),
 ]
 
 # Guard: phrases that look like search intent but are really fast-router commands.
@@ -174,11 +176,23 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
     t_start = time.perf_counter()
     memory.add_user_message(user_text)
 
-    system_prompt = (
-        "You are KYOMA, a physical AI desktop companion. "
-        "Always call an appropriate tool for PC automation or search tasks. "
-        "Answer directly, concisely, and speak naturally."
-    )
+    # Adaptive response length and detail handling
+    req_lower = (user_text or "").lower()
+    wants_elaboration = any(k in req_lower for k in ["explain", "elaborate", "detail", "step-by-step", "step by step", "tell me more", "in-depth", "comprehensive", "walk me through"])
+    max_tokens = 768 if wants_elaboration else 256
+
+    if wants_elaboration:
+        system_prompt = (
+            "You are KYOMA, a physical AI desktop companion. "
+            "When the user asks to explain, elaborate, or provide step-by-step details, respond thoroughly and completely without artificial limits. "
+            "Speak naturally and clearly."
+        )
+    else:
+        system_prompt = (
+            "You are KYOMA, a physical AI desktop companion. "
+            "Answer directly and naturally, typically around 1 to 2 lines. "
+            "Always speak naturally and avoid unprompted verbosity."
+        )
 
     # ── Direct search fast-path ───────────────────────────────────────────────
     if is_search_query(user_text):
@@ -218,9 +232,9 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
             _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
                 _future = _executor.submit(search_web_evidence, search_query, 3)
-                search_result = _future.result(timeout=6.0)
+                search_result = _future.result(timeout=10.0)
             except concurrent.futures.TimeoutError:
-                print("[KYOMA_SEARCH] Search timed out after 6.0s")
+                print("[KYOMA_SEARCH] Search timed out after 10.0s")
                 search_result = None
             except Exception as _se:
                 print(f"[KYOMA_SEARCH] Search exception: {_se}")
@@ -254,21 +268,34 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
                 )
             search_evidence_context = "\n\n".join(lines)
         else:
-            # Honest fallback when evidence is insufficient
-            fallback_msg = "I searched for that, but couldn't find reliable information. Would you like me to open Google in your browser?"
+            # Offer to open the actual search query on Google rather than empty homepage
+            encoded_query = urllib.parse.quote_plus(search_query)
+            query_url = f"https://www.google.com/search?q={encoded_query}"
+            try:
+                from pending_actions import set_pending_action
+                set_pending_action(
+                    action_type="open_failed_search",
+                    data={"search_url": query_url, "query": search_query},
+                    prompt_to_user="I searched for that, but couldn't find reliable information. Would you like me to open the search results for you in your browser?"
+                )
+            except Exception:
+                pass
+            fallback_msg = f"I searched for '{search_query}', but couldn't find reliable information. Would you like me to open the search results in your browser?"
             memory.add_assistant_message(text=fallback_msg)
-            print(f"[KYOMA_SEARCH] Insufficient evidence — returning natural fallback in {time.perf_counter()-t_start:.2f}s")
+            print(f"[KYOMA_SEARCH] Insufficient evidence — offering search query link in {time.perf_counter()-t_start:.2f}s")
             return {"ok": True, "text": fallback_msg}
 
         # 5. Single Gemma call: question + top-3 evidence
         search_prompt = (
             f"User Question: {user_text}\n"
             f"Search Topic: {search_query}\n\n"
-            f"Search Evidence (Top 3 Results):\n{search_evidence_context}\n\n"
-            "Please answer the user's question directly in 1-2 natural, concise spoken sentences based strictly "
-            "on the search evidence. If the evidence is insufficient or does not contain the answer, say that "
-            "you could not find reliable current information on that topic. Never say 'the search evidence does not state' "
-            "or use internal phrasing."
+            f"Search Evidence:\n{search_evidence_context}\n\n"
+            "Instructions:\n"
+            "1. Identify the factual answer directly from the search evidence.\n"
+            "2. Note geographical relationships if relevant (e.g. Chennai is the capital of Tamil Nadu).\n"
+            "3. Answer directly and concisely in 1-2 natural spoken sentences, citing the source naturally (e.g. according to official records or Wikipedia).\n"
+            "4. Do NOT output parenthetical citations like '(Result 1)'. Speak naturally.\n"
+            "5. If the evidence is truly empty or unavailable, state that reliable current information could not be found."
         )
         try:
             t_llm_start = time.perf_counter()
@@ -280,7 +307,7 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
                 ],
                 keep_alive="1h",
                 think=False,
-                options={"temperature": 0.2, "num_predict": 256}
+                options={"temperature": 0.2, "num_predict": max_tokens}
             )
             t_llm_wall = time.perf_counter() - t_llm_start
             final_text = resp_search["message"].get("content", "").strip()
@@ -317,7 +344,7 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
             tools=active_tools,
             keep_alive="1h",
             think=False,
-            options={"temperature": 0.2, "num_predict": 256}
+            options={"temperature": 0.2, "num_predict": max_tokens}
         )
         t_call1_wall = time.perf_counter() - t_call1_start
     except Exception as tool_err:
@@ -329,7 +356,7 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
                 messages=memory.get_messages(system_prompt=system_prompt),
                 keep_alive="1h",
                 think=False,
-                options={"temperature": 0.2, "num_predict": 256}
+                options={"temperature": 0.2, "num_predict": max_tokens}
             )
             t_call1_wall = time.perf_counter() - t_call1_start
         else:
@@ -450,7 +477,7 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
                     ],
                     keep_alive="1h",
                     think=False,
-                    options={"temperature": 0.2, "num_predict": 256}
+                    options={"temperature": 0.2, "num_predict": max_tokens}
                 )
             else:
                 resp2 = ollama.chat(
@@ -458,7 +485,7 @@ def execute_ollama_workflow(user_text, model_name, memory, available_tools_list,
                     messages=memory.get_messages(system_prompt=system_prompt),
                     keep_alive="1h",
                     think=False,
-                    options={"temperature": 0.2, "num_predict": 256}
+                    options={"temperature": 0.2, "num_predict": max_tokens}
                 )
             t_call2_wall = time.perf_counter() - t_call2_start
             final_text = resp2["message"].get("content", "")

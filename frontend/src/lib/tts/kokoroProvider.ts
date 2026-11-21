@@ -40,6 +40,7 @@ export class KokoroProvider extends BaseTTSProvider {
     private async fetchVoices() {
         try {
             const response = await apiFetch("/api/tts/kokoro/voices");
+            if (!response.ok) return;
             const data = await response.json();
             this.voices = data.voices ?? [];
             if (data.current_voice) {
@@ -49,7 +50,7 @@ export class KokoroProvider extends BaseTTSProvider {
             }
             this.notifySubscribers();
         } catch (e) {
-            console.error("[KokoroProvider] Failed to fetch voices:", e);
+            console.warn("[KokoroProvider] Voices endpoint not available yet:", e);
         }
     }
 

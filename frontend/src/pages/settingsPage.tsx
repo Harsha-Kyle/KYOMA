@@ -2,7 +2,7 @@ import { Panel } from "@/components/panel";
 import SettingSwitch from "@/components/setting-switch";
 import SettingDropdown from "@/components/setting-dropdown";
 import { useSettings } from "@/context/SettingsContext";
-import { apiFetch } from "@/lib/api-client";
+
 
 function SettingsPage() {
     const { loading } = useSettings();
@@ -25,10 +25,9 @@ function SettingsPage() {
                         "always_listening": "Always Listening",
                         "push_to_talk": "Push to Talk"
                     }}
-                    onValueChange={(val) => {
-                        const fd = new FormData();
-                        fd.append("mode", val);
-                        apiFetch("/api/record/input_mode", { method: "POST", body: fd }).catch(() => {});
+                    onValueChange={() => {
+                        // updateSetting inside SettingDropdown already persists input_mode to backend settings.json
+                        // and broadcasts changes, so we avoid triggering a duplicate POST /api/record/input_mode
                     }}
                 />
                 <SettingSwitch

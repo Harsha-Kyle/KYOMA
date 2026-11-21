@@ -4,29 +4,84 @@ import { AppSidebar } from "@/components/app-sidebar"
 import pageMapping from "@/constants/page-mapping"
 import { globalStateManager } from "@/lib/globalStateManager"
 import { chatManager } from "@/lib/chatManager"
+import { useSettings } from "@/context/SettingsContext"
+import { Mic, Radio, HandMetal, Info } from "lucide-react"
 
 type PageKey = keyof typeof pageMapping
+
+const formatInputMode = (mode: string) => {
+    switch (mode?.toLowerCase()?.trim()) {
+        case "wake_word":
+            return {
+                label: "Wake Word",
+                icon: <Mic className="h-3.5 w-3.5 text-sky-400 inline mr-1" />,
+                description: 'Say "Hey Kyoma"'
+            };
+        case "always_listening":
+            return {
+                label: "Always Listening",
+                icon: <Radio className="h-3.5 w-3.5 text-emerald-400 inline mr-1" />,
+                description: 'Continuous voice recognition'
+            };
+        case "push_to_talk":
+            return {
+                label: "Push to Talk",
+                icon: <HandMetal className="h-3.5 w-3.5 text-amber-400 inline mr-1" />,
+                description: 'Hold button or shortcut'
+            };
+        default:
+            const formatted = mode ? mode.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase()) : "Unknown";
+            return {
+                label: formatted,
+                icon: <Info className="h-3.5 w-3.5 text-slate-400 inline mr-1" />,
+                description: formatted
+            };
+    }
+};
 
 function Mainpage() {
     const [currentPage, setCurrentPage] = useState<PageKey>("llm")
     const [systemState, setSystemState] = useState<string>("IDLE")
-    const inputMode = "wake_word"
+    const { settings } = useSettings()
+    const [inputMode, setInputMode] = useState<string>(() => settings["input_mode"] || globalStateManager.getState("inputMode") || "wake_word")
     const [lastCommand, setLastCommand] = useState<string>("")
     const [lastResponse, setLastResponse] = useState<string>("")
 
     useEffect(() => {
-        const unsubLLM = globalStateManager.subscribe('isLLMThinking', (thinking) => {
-            if (thinking) setSystemState("THINKING");
-            else if (!globalStateManager.getState('isTTSPlaying')) setSystemState("IDLE");
-        });
-        const unsubTTS = globalStateManager.subscribe('isTTSPlaying', (playing) => {
-            if (playing) setSystemState("SPEAKING");
-            else if (!globalStateManager.getState('isLLMThinking')) setSystemState("IDLE");
-        });
-        const unsubRec = globalStateManager.subscribe('isVoiceRecording', (rec) => {
-            if (rec && !globalStateManager.getState('isTTSPlaying') && !globalStateManager.getState('isLLMThinking')) {
+        if (settings["input_mode"] && settings["input_mode"] !== inputMode) {
+            setInputMode(settings["input_mode"]);
+            globalStateManager.updateState("inputMode", settings["input_mode"]);
+        }
+    }, [settings["input_mode"]]);
+
+    useEffect(() => {
+        const updateDerivedState = () => {
+            const isThinking = globalStateManager.getState('isLLMThinking');
+            const isSpeaking = globalStateManager.getState('isTTSPlaying');
+            const isRec = globalStateManager.getState('isVoiceRecording');
+
+            if (isThinking) {
+                setSystemState("THINKING");
+            } else if (isSpeaking) {
+                setSystemState("SPEAKING");
+            } else if (isRec) {
                 setSystemState("LISTENING");
+            } else {
+                setSystemState("IDLE");
             }
+        };
+
+        const unsubMode = globalStateManager.subscribe("inputMode", (mode) => {
+            if (mode) setInputMode(mode);
+        });
+        const unsubLLM = globalStateManager.subscribe('isLLMThinking', () => {
+            updateDerivedState();
+        });
+        const unsubTTS = globalStateManager.subscribe('isTTSPlaying', () => {
+            updateDerivedState();
+        });
+        const unsubRec = globalStateManager.subscribe('isVoiceRecording', () => {
+            updateDerivedState();
         });
         const unsubChat = chatManager.subscribe((messages) => {
             if (messages && messages.length > 0) {
@@ -38,6 +93,7 @@ function Mainpage() {
         });
 
         return () => {
+            unsubMode();
             unsubLLM();
             unsubTTS();
             unsubRec();
@@ -61,7 +117,16 @@ function Mainpage() {
                             }`} />
                             <strong className="text-foreground font-mono">{systemState}</strong>
                         </span>
-                        <span className="hidden sm:inline">Mode: <span className="font-mono text-foreground font-semibold">{inputMode}</span></span>
+                        <span className="hidden sm:inline">
+                            Mode:{" "}
+                            <span
+                                className="font-medium text-foreground inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-background/60 border border-border/50 text-[11px]"
+                                title={formatInputMode(inputMode).description}
+                            >
+                                {formatInputMode(inputMode).icon}
+                                {formatInputMode(inputMode).label}
+                            </span>
+                        </span>
                     </div>
                     {(lastCommand || lastResponse) && (
                         <div 

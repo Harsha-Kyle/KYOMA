@@ -37,10 +37,17 @@ export class GPTSoVITSProvider extends BaseTTSProvider {
     }
 
     private async fetchVoices() {
-        const response = await apiFetch('/api/tts/voices');
-        const data = await response.json();
-        this.voices = data.voices.map((voice: string) => ({ name: voice }));
-        this.notifySubscribers();
+        try {
+            const response = await apiFetch('/api/tts/voices');
+            if (!response.ok) return;
+            const data = await response.json();
+            if (data?.voices && Array.isArray(data.voices)) {
+                this.voices = data.voices.map((voice: string) => ({ name: voice }));
+                this.notifySubscribers();
+            }
+        } catch (e) {
+            console.warn('[GPTSoVITSProvider] Voices endpoint not available yet:', e);
+        }
     }
 
     getVoices(): TTSVoice[] {

@@ -7,7 +7,7 @@ try:
     LLAMA_CPP_AVAILABLE = True
 except ImportError:
     LLAMA_CPP_AVAILABLE = False
-    logger.warning("llama-cpp-python not found. Vision LLM support will be disabled. Please install it to use local GGUF vision models.")
+    logger.debug("llama-cpp-python not installed; local vision GGUF models disabled (using Ollama runtime).")
 import base64
 import pyautogui
 

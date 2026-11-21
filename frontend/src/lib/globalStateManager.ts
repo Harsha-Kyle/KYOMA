@@ -7,6 +7,7 @@ interface GlobalState {
     isAutoCapture: boolean;
     isTTSPlaying: boolean;
     isLLMThinking: boolean;
+    inputMode: string;
 }
 
 class GlobalStateManager {
@@ -16,7 +17,8 @@ class GlobalStateManager {
     isVoiceRecording: false,
     isAutoCapture: false,
     isTTSPlaying: false,
-    isLLMThinking: false
+    isLLMThinking: false,
+    inputMode: "wake_word"
   };
 
 

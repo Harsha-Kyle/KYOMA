@@ -7,7 +7,7 @@ try:
     LLAMA_CPP_AVAILABLE = True
 except ImportError:
     LLAMA_CPP_AVAILABLE = False
-    logger.warning("llama-cpp-python not found. Local LLM support will be disabled. Please install it to use local GGUF models.")
+    logger.debug("llama-cpp-python not installed; local GGUF models disabled (using Ollama runtime).")
 
 from .BaseLLM import BaseLLM
 from datetime import datetime

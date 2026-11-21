@@ -9,17 +9,17 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Panel } from "./panel";
-import { ScrollArea } from "@radix-ui/react-scroll-area";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 import { pipelineManager } from "@/lib/pipelineManager";
 import { globalStateManager } from "@/lib/globalStateManager";
-import { apiFetch, getApiKey } from "@/lib/api-client";
+import { apiFetch } from "@/lib/api-client";
+import { audioWebSocketService } from "@/lib/audioWebSocketService";
 
 export default function VoiceStreamer() {
   const [isRecording, setIsRecording] = useState(false);
   const [probability, setProbability] = useState<number | null>(null);
   const [transcriptions, setTranscriptions] = useState<string[]>([]);
-  const socketRef = useRef<WebSocket | null>(null);
   const isTTSPlayingRef = useRef<boolean>(false);
   const isLLMThinkingRef = useRef<boolean>(false);
 
@@ -34,10 +34,22 @@ export default function VoiceStreamer() {
   const lastTaskIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    let prevRecording: boolean | null = null;
     // Subscribe to global recording state
     const unsubscribe = globalStateManager.subscribe('isVoiceRecording', async (recording) => {
       setIsRecording(recording);
-      // Make appropriate API calls based on recording state
+      if (prevRecording === null) {
+        // Initial subscription callback: only make an API call if recording is actually true
+        prevRecording = recording;
+        if (recording) {
+          await apiFetch("/api/record/start", { method: "POST" });
+        }
+        return;
+      }
+      if (prevRecording === recording) return;
+      prevRecording = recording;
+
+      // Make appropriate API calls based on recording state transition
       if (recording) {
         await apiFetch("/api/record/start", { method: "POST" });
       } else {
@@ -101,10 +113,12 @@ export default function VoiceStreamer() {
         const turnComplete = taskDone && !isThinking && !isPlaying;
 
         if (turnComplete && muteIssuedRef.current) {
-          // Turn ended — unmute exactly once
+          // Turn ended — wait 500ms post-playback guard before unmuting mic
           turnActiveRef.current = false;
           muteIssuedRef.current = false;
-          await apiFetch('/api/record/unmute', { method: 'POST' }).catch(() => {});
+          setTimeout(async () => {
+            await apiFetch('/api/record/unmute', { method: 'POST' }).catch(() => {});
+          }, 500);
         }
       }
     }, 200);
@@ -117,43 +131,20 @@ export default function VoiceStreamer() {
   }, []);
 
   useEffect(() => {
-    const key = getApiKey();
-    const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const wsUrl = `${wsProtocol}://${window.location.host}/ws/audio${key ? `?api_key=${encodeURIComponent(key)}` : ""}`;
-    const socket = new WebSocket(wsUrl);
-
-    socket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+    const unsubscribe = audioWebSocketService.subscribe((data) => {
       if (data.type === "probability") {
-        // DISABLED: prevent self-interruption during TTS playback
-        /*
-        if (data.probability >= 0.45 && !isTTSPlayingRef.current && pipelineManager.getCurrentTask()?.status != "pending_interruption"){
-          pipelineManager.interruptCurrentTask()
-        }
-        */
         setProbability(data.probability);
       } else if (data.type === "transcription") {
-        // Gate transcription: discard if TTS is playing OR LLM is actively thinking
-        if (isTTSPlayingRef.current || isLLMThinkingRef.current) {
-          console.log("[VoiceStreamer] Ignored transcript during speech/thinking:", data.text);
-          return;
-        }
         const text = (data.text || "").trim();
-        // Discard dot-only noise e.g. ". . . . ." or empty/whitespace/punctuation-only strings
-        const alphanumericOnly = text.replace(/[^\w\s]/gi, '').trim();
-        if (!alphanumericOnly) {
-          console.log("[VoiceStreamer] Silently discarded noise/dot transcript:", text);
-          return;
+        const alphanumericOnly = text.replace(/[^\w\s]/gi, "").trim();
+        if (alphanumericOnly) {
+          setTranscriptions((prev) => [...prev, text]);
         }
-        pipelineManager.addInputTask(text);
-        setTranscriptions((prev) => [...prev, text]);
       }
+    });
 
-    };
-
-    socketRef.current = socket;
     return () => {
-      socket.close();
+      unsubscribe();
     };
   }, []);
 

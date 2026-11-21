@@ -89,6 +89,32 @@ def _is_reminder_voice_enabled() -> bool:
 _reminder_speech_queue = queue.Queue()
 _reminder_worker_running = False
 _reminder_lock = threading.Lock()
+_reminder_audio_cache = {}  # reminder_id -> bytes
+
+def presynthesize_reminder_audio(reminder_id: int, text: str):
+    """Pre-synthesize reminder audio at scheduling time into in-memory cache."""
+    def _worker():
+        audio_bytes = None
+        if _tts_instance is not None:
+            try:
+                audio_bytes = _tts_instance.synthesize(text)
+                if isinstance(audio_bytes, dict):
+                    audio_bytes = None
+            except Exception:
+                pass
+        if not audio_bytes:
+            try:
+                import requests
+                resp = requests.post("http://localhost:8000/api/tts", json={"text": text}, timeout=10.0)
+                if resp.status_code == 200 and resp.content:
+                    audio_bytes = resp.content
+            except Exception:
+                pass
+        if audio_bytes and isinstance(audio_bytes, (bytes, bytearray)):
+            _reminder_audio_cache[reminder_id] = audio_bytes
+            log_event(f"⚡ [Reminder Pre-Cache] Pre-synthesized {len(audio_bytes)} bytes for reminder {reminder_id}: '{text}'")
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 def _reminder_playback_worker():
     import time
@@ -96,64 +122,89 @@ def _reminder_playback_worker():
     import requests
     global _reminder_worker_running
 
+    log_event("🔊 [Reminder Stage 1/4] Playback worker started.")
     while True:
         try:
-            text = _reminder_speech_queue.get(timeout=2.0)
+            item = _reminder_speech_queue.get(timeout=2.0)
         except queue.Empty:
             with _reminder_lock:
                 _reminder_worker_running = False
+                log_event("🔊 [Reminder Worker] Queue empty, worker exiting.")
                 break
 
-        # Wait if KYOMA is currently thinking or speaking
+        if isinstance(item, tuple):
+            text, r_id = item
+        else:
+            text, r_id = item, None
+
+        # Wait briefly only if system is actively in conversational TTS output (max 5s, don't stall)
+        wait_start = time.time()
         while True:
             is_busy = False
             if _voice_input_instance is not None:
-                if getattr(_voice_input_instance, "system_state", "IDLE") in ("THINKING", "SPEAKING"):
+                if getattr(_voice_input_instance, "system_state", "IDLE") == "SPEAKING":
                     is_busy = True
-            if not is_busy:
+            if not is_busy or (time.time() - wait_start > 5.0):
                 break
-            time.sleep(0.5)
+            time.sleep(0.1)
 
+        t_audio_start = time.time()
         # 1. Mute microphone before reminder playback
+        log_event(f"🔊 [Reminder Stage 2/4] Muting microphone at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} for: '{text}'")
         if _voice_input_instance is not None:
             try:
                 _voice_input_instance.mute()
-            except Exception:
-                pass
+            except Exception as _me:
+                log_event(f"⚠️ [Reminder Mic Mute Error] {_me}")
         else:
             try:
                 requests.post("http://localhost:8000/api/record/mute", timeout=0.5)
             except Exception:
                 pass
 
-        # 2. Synthesize audio via in-process TTS or HTTP fallback
-        audio_bytes = None
-        if _tts_instance is not None:
-            try:
-                audio_bytes = _tts_instance.synthesize(text)
-            except Exception as e:
-                log_event(f"⚠️ [Reminder TTS Direct Error] {e}")
+        # 2. Retrieve pre-cached audio or synthesize on demand
+        audio_bytes = _reminder_audio_cache.pop(r_id, None) if r_id else None
+        if audio_bytes:
+            log_event(f"⚡ [Reminder Stage 3/4] Using pre-cached audio ({len(audio_bytes)} bytes) for: '{text}'")
+        else:
+            log_event(f"🔊 [Reminder Stage 3/4] Synthesizing speech via Kokoro for: '{text}'")
+            if _tts_instance is not None:
+                try:
+                    audio_bytes = _tts_instance.synthesize(text)
+                    if isinstance(audio_bytes, dict):
+                        log_event(f"⚠️ [Reminder TTS Direct Error] Returned dict: {audio_bytes}")
+                        audio_bytes = None
+                except Exception as e:
+                    log_event(f"⚠️ [Reminder TTS Direct Error] {e}")
 
-        if not audio_bytes:
-            try:
-                resp = requests.post(
-                    "http://localhost:8000/api/tts",
-                    json={"text": text},
-                    timeout=5.0
-                )
-                if resp.status_code == 200 and resp.content:
-                    audio_bytes = resp.content
-            except Exception as e:
-                log_event(f"⚠️ [Reminder TTS HTTP Error] {e}")
+            if not audio_bytes:
+                try:
+                    resp = requests.post(
+                        "http://localhost:8000/api/tts",
+                        json={"text": text},
+                        timeout=10.0
+                    )
+                    if resp.status_code == 200 and resp.content:
+                        audio_bytes = resp.content
+                except Exception as e:
+                    log_event(f"⚠️ [Reminder TTS HTTP Error] {e}")
 
         # 3. Play audio
-        if audio_bytes:
+        if audio_bytes and isinstance(audio_bytes, (bytes, bytearray)):
+            log_event(f"🔊 [Reminder Stage 4/4] Audio playback START at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} ({len(audio_bytes)} bytes)")
             try:
                 winsound.PlaySound(audio_bytes, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+                log_event(f"✅ [Reminder Playback Complete] Audio playback END at {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
             except Exception as e:
                 log_event(f"⚠️ [Reminder PlaySound Error] {e}")
+        else:
+            log_event("⚠️ [Reminder Playback Error] No audio bytes available for playback!")
+
+        # Keep mic muted during playback and for exactly 500ms afterward to prevent speaker bleed
+        time.sleep(0.5)
 
         # 4. Unmute microphone and restore appropriate standby state based on input mode
+        log_event(f"🎙️ [Reminder Mic Restoration] Unmuting mic at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} (+500ms guard)")
         if _voice_input_instance is not None:
             try:
                 _voice_input_instance.unmute()
@@ -161,8 +212,8 @@ def _reminder_playback_worker():
                     _voice_input_instance.system_state = "LISTENING"
                 else:
                     _voice_input_instance.system_state = "IDLE"
-            except Exception:
-                pass
+            except Exception as _ume:
+                log_event(f"⚠️ [Reminder Mic Unmute Error] {_ume}")
         else:
             try:
                 requests.post("http://localhost:8000/api/record/unmute", timeout=0.5)
@@ -171,18 +222,37 @@ def _reminder_playback_worker():
 
         _reminder_speech_queue.task_done()
 
-def _speak_reminder(text: str):
+def stop_reminder_speech():
+    """
+    Immediately stops active reminder speech playback and flushes the queue.
+    Crucial: Does NOT cancel, clear, or delete any scheduled reminders in the DB or scheduler.
+    """
+    global _reminder_speech_queue
+    try:
+        import winsound
+        winsound.PlaySound(None, 0)
+    except Exception:
+        pass
+    # Drain any remaining speech queue
+    while not _reminder_speech_queue.empty():
+        try:
+            _reminder_speech_queue.get_nowait()
+            _reminder_speech_queue.task_done()
+        except Exception:
+            break
+    log_event("🛑 [Reminder Audio Stop] Active reminder speech silenced (scheduled jobs preserved).")
+
+def _speak_reminder(text: str, reminder_id: int = None):
     """
     Queue reminder speech for playback. Checks 'reminder.speak_aloud' setting,
-    waits for LLM/TTS to finish, mutes the microphone in-process, plays audio,
-    and returns to idle/wake-word standby cleanly.
+    mutes the microphone, plays audio, and guards for 500ms before unmuting.
     """
     if not _is_reminder_voice_enabled():
         log_event(f"ℹ️ [Reminder Voice Skipped] 'reminder.speak_aloud' is disabled: '{text}'")
         return
 
     global _reminder_worker_running
-    _reminder_speech_queue.put(text)
+    _reminder_speech_queue.put((text, reminder_id))
     with _reminder_lock:
         if not _reminder_worker_running:
             _reminder_worker_running = True
@@ -357,6 +427,8 @@ def add_reminder(title: str, message: str, remind_time: str, recurrence: str = N
     }
 
     schedule_reminder(reminder)
+    spoken_text = f"Reminder: {clean_title}. {clean_msg}" if clean_msg and clean_msg != clean_title else f"Reminder: {clean_title}."
+    presynthesize_reminder_audio(reminder_id, spoken_text)
     log_event(f"🗓️ [Scheduled              ] reminder : '{clean_title}' at {normalized_time} (recurrence: {recurrence})")
     return _format_reminder_response(clean_title, normalized_time, recurrence)
 
@@ -456,12 +528,12 @@ def trigger_reminder(title, message, reminder_id, repeat_interval=None):
             mark_reminder_completed(reminder_id)
         return 0
 
-    log_event(f"🔔 [Triggered              ] reminder : '{title}' - {message} at {datetime.now().strftime('%H:%M:%S')}")
+    log_event(f"🔔 [Triggered              ] reminder : '{title}' - {message} at {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
     print(f"🔔 Reminder firing: '{title}' — {message}")
 
     # Deliver reminder via spoken TTS audio with mic-mute protection
     spoken_text = f"Reminder: {title}. {message}" if message and message != title else f"Reminder: {title}."
-    _speak_reminder(spoken_text)
+    _speak_reminder(spoken_text, reminder_id=reminder_id)
 
     # Show the reminder toast via winotify (native Windows action center) with win10toast fallback
     toast_shown = False
@@ -476,6 +548,7 @@ def trigger_reminder(title, message, reminder_id, repeat_interval=None):
         toast.set_audio(audio.Default, loop=False)
         toast.show()
         toast_shown = True
+        log_event(f"🍞 [Toast Shown            ] winotify toast shown at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} for: '{title}'")
     except Exception as notif_err:
         log_event(f"⚠️ [Winotify Error         ] {notif_err}")
 
@@ -485,9 +558,10 @@ def trigger_reminder(title, message, reminder_id, repeat_interval=None):
                 f"Reminder: {title}",
                 message or "Reminder!",
                 icon_path=None,
-                duration=10,
-                threaded=False
+                duration=5,
+                threaded=True
             )
+            log_event(f"🍞 [Toast Shown            ] fallback toast shown at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} for: '{title}'")
         except Exception as e:
             log_event(f"⚠️ [Toast Fallback Error   ] {e}")
 

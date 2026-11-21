@@ -31,6 +31,7 @@ const footerKeys: PageKey[] = ["input","vision","tts", "pipeline-monitor", "stre
 export function AppSidebar({ onItemClick, activePage }: { onItemClick: (key: PageKey) => void, activePage?: PageKey }) {
   return (
     <Sidebar collapsible="icon">
+      <TooltipProvider delayDuration={150}>
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel>Test pipeline</SidebarGroupLabel>
@@ -38,21 +39,19 @@ export function AppSidebar({ onItemClick, activePage }: { onItemClick: (key: Pag
             <SidebarMenu>
               {testPipelineKeys.map((key) => (
                 <SidebarMenuItem key={key}>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger>
-                        <SidebarMenuButton asChild isActive={key === activePage}>
-                          <a onClick={() => onItemClick(key)}>
-                            {React.createElement(pageMapping[key].icon)}
-                            <span>{pageMapping[key].title}</span>
-                          </a>
-                        </SidebarMenuButton>
-                      </TooltipTrigger>
-                      <TooltipContent side={"right"} >
-                        <p>{pageMapping[key].title}</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <SidebarMenuButton asChild isActive={key === activePage}>
+                        <a onClick={() => onItemClick(key)}>
+                          {React.createElement(pageMapping[key].icon)}
+                          <span>{pageMapping[key].title}</span>
+                        </a>
+                      </SidebarMenuButton>
+                    </TooltipTrigger>
+                    <TooltipContent side={"right"} >
+                      <p>{pageMapping[key].title}</p>
+                    </TooltipContent>
+                  </Tooltip>
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>
@@ -64,9 +63,8 @@ export function AppSidebar({ onItemClick, activePage }: { onItemClick: (key: Pag
         <SidebarMenu>
           {footerKeys.map((key) => (
             <SidebarMenuItem key={key}>
-            <TooltipProvider>
               <Tooltip>
-                <TooltipTrigger>
+                <TooltipTrigger asChild>
                   <SidebarMenuButton asChild isActive={key === activePage}>
                     <a onClick={() => onItemClick(key)}>
                       {React.createElement(pageMapping[key].icon)}
@@ -78,12 +76,12 @@ export function AppSidebar({ onItemClick, activePage }: { onItemClick: (key: Pag
                   <p>{pageMapping[key].title}</p>
                 </TooltipContent>
               </Tooltip>
-            </TooltipProvider>
           </SidebarMenuItem>
           ))}
         </SidebarMenu>
         <ModeToggle></ModeToggle>
       </SidebarFooter>
+      </TooltipProvider>
     </Sidebar>
   )
 }

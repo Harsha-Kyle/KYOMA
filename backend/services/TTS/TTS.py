@@ -146,6 +146,8 @@ class TTS:
             text = sanitize_for_tts(text)
         except Exception:
             pass
+        if not text or not any(c.isalnum() for c in text):
+            return None
         return self._engine.synthesize(text)
 
     def upload_voice(self, name, reference_audio, reference_text, reference_language):

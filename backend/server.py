@@ -19,7 +19,8 @@ class RedactAPIKeyFilter(logging.Filter):
             record.msg = re.sub(r"([?&]api_key=)[^&\s]+", r"\1[REDACTED]", record.msg)
         return True
 
-logging.getLogger("uvicorn.access").addFilter(RedactAPIKeyFilter())
+for _l in ("uvicorn", "uvicorn.access", "uvicorn.error", "fastapi"):
+    logging.getLogger(_l).addFilter(RedactAPIKeyFilter())
 
 import time
 from services.lib.startup_progress import startup_progress
@@ -43,7 +44,7 @@ from services.lib.port_forward import create_proxy_middleware
 from services.lib.process_manager import process_manager
 import os
 import aiofiles
-import aiohttp
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, WebSocket, HTTPException, File, UploadFile, Form
 from fastapi.websockets import WebSocketDisconnect
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
@@ -55,8 +56,7 @@ from services.LLM.LLM import LLM
 from pydantic import BaseModel
 from datetime import datetime
 import json
-from typing import Any, Dict, List
-import mss
+from typing import Any, Dict, List, Optional
 try:
     from backend.auth import API_KEY
 except ImportError:
@@ -108,7 +108,97 @@ if not rvc_demo_mode and os.path.exists(rvc_runtime_python) and os.path.exists(r
 else:
     logger.warning("RVC server skipped: runtime or script not found. Please install the RVC standalone pack if required.")
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager replacing deprecated @app.on_event startup/shutdown."""
+    try:
+        from services.LLM.KyomaLLM import set_search_broadcast_hook
+        loop = asyncio.get_event_loop()
+        set_search_broadcast_hook(loop, broadcast_state_all)
+        logger.info("[Search] KyomaLLM broadcast hook registered.")
+    except Exception as _e:
+        logger.warning(f"[Search] Could not register KyomaLLM broadcast hook: {_e}")
+
+    try:
+        voice_input.state_callback = broadcast_state_all
+        logger.info("[VoiceInput] state_callback connected to broadcast_state_all.")
+    except Exception as _e:
+        logger.warning(f"[VoiceInput] Could not connect state_callback: {_e}")
+
+    try:
+        kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
+        if kyoma_path not in sys.path:
+            sys.path.append(kyoma_path)
+        import reminder_utils
+        reminder_utils.register_voice_services(voice_input=voice_input, tts=tts)
+        logger.info("[Reminder] In-process voice services registered with reminder_utils.")
+    except Exception as _re:
+        logger.warning(f"[Reminder] Could not register in-process voice services: {_re}")
+
+    try:
+        await run_startup_health_check()
+    except Exception as _e:
+        logger.error(f"[HealthCheck] Error during startup health check: {_e}")
+
+    async def _async_warmup():
+        def _warm():
+            try:
+                import ollama
+                startup_progress.get_subsystem("model").start("Warming up Gemma model...")
+                logger.info("[Warmup] Warming up Ollama Gemma model in background...")
+                t_w0 = time.perf_counter()
+                ollama.chat(
+                    model="gemma4:e2b",
+                    messages=[{"role": "user", "content": "hi"}],
+                    keep_alive="1h",
+                    think=False,
+                    options={"temperature": 0.2, "num_predict": 1}
+                )
+                elapsed = time.perf_counter() - t_w0
+                startup_progress.get_subsystem("model").complete(f"Gemma warmed up in {elapsed:.2f}s")
+                logger.info(f"[Warmup] Gemma model warmed up in {elapsed:.2f}s")
+            except Exception as _we:
+                startup_progress.get_subsystem("model").degrade(f"Warmup failed (non-critical): {_we}")
+                logger.warning(f"[Warmup] Gemma model warmup failed (non-critical): {_we}")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _warm)
+
+    asyncio.create_task(_async_warmup())
+
+    async def _mic_recovery_watchdog():
+        _stuck_since = None
+        while True:
+            await asyncio.sleep(5)
+            try:
+                if not voice_input.is_muted:
+                    _stuck_since = None
+                    continue
+                if voice_input.system_state in ("THINKING", "SPEAKING"):
+                    _stuck_since = None
+                    continue
+                if _stuck_since is None:
+                    _stuck_since = time.time()
+                elif time.time() - _stuck_since > 45:
+                    logger.warning("[MicRecovery] Microphone stuck muted for >45s without active state. Recovering.")
+                    voice_input.unmute()
+                    if voice_input.input_mode == "always_listening":
+                        voice_input.system_state = "LISTENING"
+                    else:
+                        voice_input.system_state = "IDLE"
+                    await broadcast_state_all(voice_input.system_state)
+                    _stuck_since = None
+            except Exception as _wd_err:
+                logger.debug(f"[MicRecovery] Watchdog error: {_wd_err}")
+                _stuck_since = None
+
+    asyncio.create_task(_mic_recovery_watchdog())
+
+    yield
+
+    # Clean shutdown
+    process_manager.stop_all_servers()
+
+app = FastAPI(lifespan=lifespan)
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
     EXEMPT_PATHS = {
@@ -341,98 +431,6 @@ async def get_startup_health():
     return JSONResponse(status_code=200 if all_ok else 503, content={"status": "healthy" if all_ok else "degraded", "checks": report})
 
 
-@app.on_event("startup")
-async def _on_startup():
-    """Register the KyomaLLM broadcast hook and VoiceInput state callback once event loop is running."""
-    try:
-        from services.LLM.KyomaLLM import set_search_broadcast_hook
-        loop = asyncio.get_event_loop()
-        set_search_broadcast_hook(loop, broadcast_state_all)
-        logger.info("[Search] KyomaLLM broadcast hook registered.")
-    except Exception as _e:
-        logger.warning(f"[Search] Could not register KyomaLLM broadcast hook: {_e}")
-
-    try:
-        # Connect VoiceInput state transitions to WebUI and ESP32
-        voice_input.state_callback = broadcast_state_all
-        logger.info("[VoiceInput] state_callback connected to broadcast_state_all.")
-    except Exception as _e:
-        logger.warning(f"[VoiceInput] Could not connect state_callback: {_e}")
-
-    try:
-        # Register in-process voice_input and tts with Kyoma reminder_utils
-        kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
-        if kyoma_path not in sys.path:
-            sys.path.append(kyoma_path)
-        import reminder_utils
-        reminder_utils.register_voice_services(voice_input=voice_input, tts=tts)
-        logger.info("[Reminder] In-process voice services registered with reminder_utils.")
-    except Exception as _re:
-        logger.warning(f"[Reminder] Could not register in-process voice services: {_re}")
-
-    # Startup Health Check
-    try:
-        await run_startup_health_check()
-    except Exception as _e:
-        logger.error(f"[HealthCheck] Error during startup health check: {_e}")
-
-    # Non-blocking Gemma model warm-up in background thread
-    async def _async_warmup():
-        def _warm():
-            try:
-                import ollama
-                logger.info("[Warmup] Warming up Ollama Gemma model in background...")
-                t_w0 = time.perf_counter()
-                ollama.chat(
-                    model="gemma4:e2b",
-                    messages=[{"role": "user", "content": "hi"}],
-                    keep_alive="1h",
-                    think=False,
-                    options={"temperature": 0.2, "num_predict": 1}
-                )
-                logger.info(f"[Warmup] Gemma model warmed up in {time.perf_counter() - t_w0:.2f}s")
-            except Exception as _we:
-                logger.warning(f"[Warmup] Gemma model warmup failed (non-critical): {_we}")
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _warm)
-
-    asyncio.create_task(_async_warmup())
-
-    # ── Microphone recovery watchdog ──────────────────────────────────────
-    # Failsafe: if the mic stays muted for >45s without an active THINKING
-    # or SPEAKING state, something went wrong — recover automatically.
-    async def _mic_recovery_watchdog():
-        _stuck_since = None
-        while True:
-            await asyncio.sleep(5)
-            try:
-                if not voice_input.is_muted:
-                    _stuck_since = None
-                    continue
-                # Don't recover during legitimate active states
-                if voice_input.system_state in ("THINKING", "SPEAKING"):
-                    _stuck_since = None
-                    continue
-                if _stuck_since is None:
-                    _stuck_since = time.time()
-                elif time.time() - _stuck_since > 45:
-                    logger.warning(
-                        "[MicRecovery] Microphone stuck muted for >45s "
-                        "without active state. Recovering."
-                    )
-                    voice_input.unmute()
-                    # Restore appropriate state based on input mode
-                    if voice_input.input_mode == "always_listening":
-                        voice_input.system_state = "LISTENING"
-                    else:
-                        voice_input.system_state = "IDLE"
-                    await broadcast_state_all(voice_input.system_state)
-                    _stuck_since = None
-            except Exception as _wd_err:
-                logger.debug(f"[MicRecovery] Watchdog error: {_wd_err}")
-                _stuck_since = None
-
-    asyncio.create_task(_mic_recovery_watchdog())
 
 # *******************************
 # WebUI
@@ -449,6 +447,35 @@ async def serve_black_png():
 # *******************************
 # Input
 # *******************************
+
+
+@app.post("/api/audio/stop")
+async def stop_all_active_audio():
+    """
+    Immediate backend silence: stops active reminder playback (winsound),
+    unmutes microphone, and resets state.
+    Preserves all scheduled reminder records and future jobs.
+    """
+    try:
+        kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
+        if kyoma_path not in sys.path:
+            sys.path.append(kyoma_path)
+        import reminder_utils
+        reminder_utils.stop_reminder_speech()
+    except Exception as e:
+        logger.warning(f"Error in stop_reminder_speech: {e}")
+
+    try:
+        voice_input.unmute()
+        if voice_input.input_mode == "always_listening":
+            voice_input.system_state = "LISTENING"
+        else:
+            voice_input.system_state = "IDLE"
+        await broadcast_state_all(voice_input.system_state)
+    except Exception as e:
+        logger.warning(f"Error unmuting voice_input on audio stop: {e}")
+
+    return JSONResponse(content={"status": "ok", "message": "Playback silenced; scheduled reminders preserved."})
 
 @app.post("/api/record/start")
 async def start_recording():
@@ -493,6 +520,15 @@ async def set_input_mode(mode: str = Form(...)):
     if clean_mode not in ("always_listening", "wake_word", "push_to_talk"):
         return JSONResponse(status_code=400, content={"error": f"Invalid mode: {mode}"})
     voice_input.input_mode = clean_mode
+    settings_manager.update_settings({"input_mode": clean_mode})
+    # Broadcast to all connected WebUI clients so status bar updates immediately
+    dead_clients = set()
+    for client in list(clients):
+        try:
+            await client.send_json({"type": "input_mode", "input_mode": clean_mode})
+        except Exception:
+            dead_clients.add(client)
+    clients.difference_update(dead_clients)
     logger.info(f"[Server] VoiceInput input_mode switched to: {clean_mode}")
     return JSONResponse(content={"status": "ok", "input_mode": clean_mode})
 
@@ -504,14 +540,20 @@ async def websocket_audio(websocket: WebSocket):
     if not key or not secrets.compare_digest(key, API_KEY):
         await websocket.close(code=1008)
         return
+    # Add client to the set of connected WebUI clients
     clients.add(websocket)
+    # Send current active input mode immediately upon WebSocket connection
+    try:
+        await websocket.send_json({"type": "input_mode", "input_mode": voice_input.input_mode})
+    except Exception:
+        pass
     try:
         while True:
             await websocket.receive_text()
     except Exception:
         pass
     finally:
-        clients.remove(websocket)
+        clients.discard(websocket)
         try:
             await websocket.close()
         except RuntimeError:
@@ -662,11 +704,16 @@ async def get_monitor_info():
     Get information about available monitors.
     """
     try:
-        monitors = vision_input.get_monitors()
-        logger.info(f"Monitors Server: {monitors}")
+        raw_monitors = vision_input.get_monitors()
+        # In MSS on Windows/Linux, index 0 is always the virtual all-monitors bounding box.
+        # If there are physical monitors (len > 1), filter out virtual monitor 0 to prevent duplicates.
+        if len(raw_monitors) > 1:
+            actual_monitors = raw_monitors[1:]
+        else:
+            actual_monitors = raw_monitors
             
         monitor_info = []
-        for i, monitor in enumerate(monitors):
+        for i, monitor in enumerate(actual_monitors):
             # Determine if this is likely the primary monitor
             # Primary monitor usually has left=0 and top=0 or is the first actual monitor
             is_primary = (monitor["left"] == 0 and monitor["top"] == 0)
@@ -685,7 +732,7 @@ async def get_monitor_info():
             status_code=200,
             content={
                 "monitors": monitor_info,
-                "count": len(monitors)
+                "count": len(monitor_info)
             }
         )
     except Exception as e:
@@ -809,7 +856,7 @@ async def websocket_chat(websocket: WebSocket):
     except Exception:
         pass
     finally:
-        chat_clients.remove(websocket)
+        chat_clients.discard(websocket)
         try:
             await websocket.close()
         except RuntimeError:
@@ -890,9 +937,24 @@ async def complete_current_response(request: CompleteResponseRequest, fastapi_re
         logger.error(f"Error during completion: {e}", exc_info=True)
         return {"error": "Internal server error"}
 
-# Utility function to wrap a regular generator as an async generator
+# Utility function to wrap a regular generator as an async generator.
+# Uses run_in_executor so that synchronous generators (e.g. KyomaLLM search
+# pipeline) do NOT block the event loop — this lets chunked HTTP responses
+# flush immediately (critical for search acknowledgement latency).
 async def async_generator_wrapper(generator):
-    for item in generator:
+    loop = asyncio.get_event_loop()
+    _sentinel = object()
+
+    def _next_item(gen):
+        try:
+            return next(gen)
+        except StopIteration:
+            return _sentinel
+
+    while True:
+        item = await loop.run_in_executor(None, _next_item, generator)
+        if item is _sentinel:
+            break
         yield item
 
 @app.get("/api/llm/models")
@@ -976,6 +1038,7 @@ async def download_model(request: DownloadModelRequest):
 async def download_model_file(download_id: str, url: str, target_path: str):
     """Download a model file with progress tracking"""
     try:
+        import aiohttp
         download_progress[download_id]['status'] = 'downloading'
         
         async with aiohttp.ClientSession() as session:
@@ -1264,7 +1327,14 @@ async def change_voice(request: ChangeVoiceRequest):
 @app.post("/api/tts")
 async def get_audio(request: TTSRequest):
     try:
-        response = tts.synthesize(request.text)
+        try:
+            from Kyoma.tts_sanitizer import sanitize_for_tts
+            cleaned_text = sanitize_for_tts(request.text)
+        except Exception:
+            cleaned_text = request.text
+        if not cleaned_text or not any(c.isalnum() for c in cleaned_text):
+            return Response(status_code=204)
+        response = tts.synthesize(cleaned_text)
         # synthesize() returns a dict when TTS is unavailable or errors
         if isinstance(response, dict):
             msg = response.get("message", "TTS synthesis failed")
@@ -1563,9 +1633,31 @@ class SettingsManager:
             llm.update_sampling_params(llm_sampling_params)
 
     def update_settings(self, updated_settings: Dict[str, Any]):
-        self.settings.update(updated_settings)
+        # Filter to settings that actually changed
+        changed = {k: v for k, v in updated_settings.items() if self.settings.get(k) != v}
+        if not changed:
+            return
+        self.settings.update(changed)
         self.save_settings(self.settings)
-        self.apply_settings()
+        # Apply specific settings without unneeded full model reload
+        for key, value in changed.items():
+            if key == "llm.model_filename":
+                llm.load_model_by_filename(value)
+            elif key == "input_mode" and "voice_input" in globals():
+                voice_input.input_mode = str(value).lower().strip()
+            elif key == "tts.provider":
+                tts.set_provider(value)
+            elif key == "tts.voice":
+                try:
+                    tts.change_voice(value)
+                except Exception:
+                    pass
+            elif key == "tts.kokoro.speed":
+                try:
+                    engine = tts._get_instance("kokoro")
+                    engine.set_speed(float(value))
+                except Exception:
+                    pass
 
 # Initialize the SettingsManager
 SETTINGS_FILE = "settings.json"
@@ -1589,11 +1681,10 @@ except Exception as e:
     startup_progress.complete_step(f"TTS warm-up failed (non-critical) in {time.time() - start_time:.2f}s")
     logger.warning(f"TTS warm-up failed (non-critical): {e}")
 
-# Log startup time
+# Log startup time (readiness is dynamically checked across required subsystems)
 startup_time = time.time() - total_start_time
-startup_progress.complete_step(f"✅ Server Ready in {startup_time:.2f}s at {datetime.now().strftime('%H:%M:%S')}")
-startup_progress.is_ready = True
-startup_progress.current_message = "All Systems Ready"
+startup_progress.complete_step(f"Initial server boot in {startup_time:.2f}s at {datetime.now().strftime('%H:%M:%S')}")
+startup_progress._check_readiness()
 
 # *******************************
 # Settings API
@@ -1625,7 +1716,7 @@ async def get_settings():
 # *******************************
 
 class CreateSessionRequest(BaseModel):
-    title: str
+    title: Optional[str] = None
 
 @app.post("/api/chat/session/create")
 async def create_chat_session(request: CreateSessionRequest):
@@ -1645,6 +1736,25 @@ async def update_chat_session(request: UpdateSessionRequest):
     try:
         success = history_store.update_session(request.session_id, request.history)
         if success:
+            async def _bg_title():
+                try:
+                    loop = asyncio.get_event_loop()
+                    new_title = await loop.run_in_executor(None, history_store.generate_title_from_history, request.session_id)
+                    if new_title:
+                        dead_clients = set()
+                        for c in list(clients):
+                            try:
+                                await c.send_json({
+                                    "type": "session_title_updated",
+                                    "session_id": request.session_id,
+                                    "title": new_title
+                                })
+                            except Exception:
+                                dead_clients.add(c)
+                        clients.difference_update(dead_clients)
+                except Exception:
+                    pass
+            asyncio.create_task(_bg_title())
             return JSONResponse(status_code=200, content={"message": "Session updated successfully"})
         return JSONResponse(status_code=404, content={"error": "Session not found"})
     except Exception as e:
@@ -1654,6 +1764,18 @@ async def update_chat_session(request: UpdateSessionRequest):
 class UpdateSessionTitleRequest(BaseModel):
     session_id: str
     title: str
+
+@app.post("/api/chat/session/{session_id}/generate-title")
+async def generate_chat_session_title(session_id: str):
+    try:
+        loop = asyncio.get_event_loop()
+        new_title = await loop.run_in_executor(None, history_store.generate_title_from_history, session_id)
+        if new_title:
+            return JSONResponse(status_code=200, content={"status": "ok", "title": new_title})
+        return JSONResponse(status_code=200, content={"status": "unchanged"})
+    except Exception as e:
+        logger.error(f"Error generating title for session {session_id}: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/api/chat/session/update-title")
 async def update_chat_session_title(request: UpdateSessionTitleRequest):

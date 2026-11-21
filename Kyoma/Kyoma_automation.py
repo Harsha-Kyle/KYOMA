@@ -553,7 +553,7 @@ AVAILABLE_TOOLS = [
     add_birthday_reminder, list_birthday_reminders, delete_birthday_reminder
 ]
 
-memory = MemoryManager(max_history=3)
+memory = MemoryManager(max_history=8)
 
 def query_ollama_with_tools(user_text, timeout_seconds=10.0):
     try:
@@ -568,6 +568,7 @@ def query_ollama_with_tools(user_text, timeout_seconds=10.0):
         import traceback
         traceback.print_exc()
         return {"ok": False, "error": str(e), "text": "I encountered an error processing your request."}
+
 
 # --------------------
 # REPL

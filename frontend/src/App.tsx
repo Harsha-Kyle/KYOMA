@@ -5,18 +5,23 @@ import Mainpage from './pages/mainpage'
 import { Toaster } from "@/components/ui/sonner"
 import LoadingScreen from '@/components/loading-screen'
 import { SettingsProvider } from '@/context/SettingsContext'
+import ErrorBoundary from '@/components/error-boundary'
 
 function App() {
   const [isLoaded, setIsLoaded] = useState(false)
 
   return (
-    <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
-      <SettingsProvider>
+    <ErrorBoundary>
+      <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
         {!isLoaded && <LoadingScreen onLoaded={() => setIsLoaded(true)} />}
-        {isLoaded && <Mainpage />}
-        <Toaster />
-      </SettingsProvider>
-    </ThemeProvider>
+        {isLoaded && (
+          <SettingsProvider>
+            <Mainpage />
+            <Toaster />
+          </SettingsProvider>
+        )}
+      </ThemeProvider>
+    </ErrorBoundary>
   )
 }
 

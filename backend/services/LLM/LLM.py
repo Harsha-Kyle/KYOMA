@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import time
 from services.lib.LAV_logger import logger
 
 from .BaseLLM import BaseLLM
@@ -20,6 +21,8 @@ class LLM:
         self.llm: BaseLLM | None = None
         self.all_model_data = None
         self.keep_model_loaded = False
+        self._ollama_cache_time = 0.0
+        self._ollama_cached_models = []
         
         # Default sampling parameters (deterministic for commands)
         self.sampling_params = {
@@ -104,25 +107,34 @@ class LLM:
         
         logger.info(f"Loaded {len(self.all_model_data)} models from metadata files")
         
-        # Also fetch models from Ollama
+        # Also fetch models from Ollama (with 30s TTL cache to avoid hammering :11434)
         try:
             ollama_url = "http://localhost:11434"
-            ensure_ollama_running(ollama_url)
-            response = requests.get(f"{ollama_url}/api/tags", timeout=2)
-            if response.status_code == 200:
-                ollama_models = response.json().get('models', [])
-                for om in ollama_models:
-                    model_data = {
-                        "displayName": f"Ollama: {om['name']}",
-                        "fileName": om['name'],
-                        "type": "text",
-                        "provider": "ollama",
-                        "base_url": ollama_url,
-                        "file_exists": True,
-                        "file_size_readable": self._format_file_size(om.get('size', 0))
-                    }
-                    self.all_model_data.append(model_data)
-                logger.info(f"Loaded {len(ollama_models)} models from Ollama")
+            now = time.time()
+            if now - self._ollama_cache_time < 30.0 and self._ollama_cached_models:
+                ollama_models = self._ollama_cached_models
+            else:
+                ensure_ollama_running(ollama_url)
+                response = requests.get(f"{ollama_url}/api/tags", timeout=2)
+                if response.status_code == 200:
+                    ollama_models = response.json().get('models', [])
+                    self._ollama_cached_models = ollama_models
+                    self._ollama_cache_time = now
+                else:
+                    ollama_models = self._ollama_cached_models
+
+            for om in ollama_models:
+                model_data = {
+                    "displayName": f"Ollama: {om['name']}",
+                    "fileName": om['name'],
+                    "type": "text",
+                    "provider": "ollama",
+                    "base_url": ollama_url,
+                    "file_exists": True,
+                    "file_size_readable": self._format_file_size(om.get('size', 0))
+                }
+                self.all_model_data.append(model_data)
+            logger.debug(f"Loaded {len(ollama_models)} models from Ollama")
         except Exception as e:
             logger.warning(f"Could not connect to Ollama: {e}")
 
@@ -205,7 +217,7 @@ class LLM:
     def load_model(self, model_data: dict, gpu_layers=-1):
         """Load a model using its metadata"""
         logger.debug(f"Loading model {model_data}...")
-        if (self.llm and self.current_model_data.get('fileName') == model_data.get('fileName')):
+        if (self.llm and self.current_model_data and self.current_model_data.get('fileName') == model_data.get('fileName')):
             logger.debug(f"Same model already loaded, load cancelled...")
             return
 

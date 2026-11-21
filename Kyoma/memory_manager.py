@@ -1,5 +1,6 @@
 class MemoryManager:
-    def __init__(self, max_history=10):
+    def __init__(self, max_history=8):
+        # 4 user/assistant turns = 8 messages total
         self.max_history = max_history
         self.history = []
 

@@ -1,8 +1,5 @@
 import mss
 from PIL import Image
-import easyocr
-from transformers import BlipProcessor, BlipForConditionalGeneration
-import torch
 import os
 import numpy as np
 from typing import List, Tuple, Dict, Optional
@@ -27,7 +24,7 @@ class VisionInput:
         self.logger = logger
         self._ocr_languages = languages
 
-        # Models are loaded lazily (on first use) to save startup memory
+        # Models and heavy libraries are loaded lazily (on first use) to save startup time and memory
         self.ocr_reader = None
         self.processor = None
         self.model = None
@@ -37,6 +34,7 @@ class VisionInput:
         """Load OCR reader on first use."""
         if self.ocr_reader is None:
             try:
+                import easyocr
                 self.logger.info("Loading OCR model (first use)...")
                 self.ocr_reader = easyocr.Reader(self._ocr_languages)
                 self.logger.info(f"OCR reader loaded with languages: {self._ocr_languages}")
@@ -47,6 +45,8 @@ class VisionInput:
         """Load BLIP captioning model on first use."""
         if self.processor is None or self.model is None:
             try:
+                import torch
+                from transformers import BlipProcessor, BlipForConditionalGeneration
                 self.logger.info("Loading BLIP captioning model (first use)...")
                 self.processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
                 self.model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")

@@ -90,7 +90,7 @@ class VoiceInput:
     SILENCE_WAIT_TIME = 0.1 * SAMPLING_RATE   # original 0.1 s (kept as class attr)
     PRE_SPEECH_SAMPLES = 0.5 * SAMPLING_RATE
     POST_SPEECH_SAMPLES = 0.5 * SAMPLING_RATE
-    MAX_UTTERANCE_SAMPLES = 15.0 * SAMPLING_RATE  # 15s max segment to prevent background audio accumulation
+    MAX_UTTERANCE_SAMPLES = 10.0 * SAMPLING_RATE  # 10s max segment to prevent background audio accumulation
 
     running = False
 
@@ -145,6 +145,7 @@ class VoiceInput:
             self.vad_model = None
         self.processing_lock = asyncio.Lock()
         self.is_muted = False
+        self._mute_ref_count: int = 0  # Proper reference counter to prevent duplicate unmutes
         self.transcription_in_flight = False  # Guard against overlapping transcription jobs
         self._transcription_generation: int = 0  # Bumped on mute/unmute to discard stale Whisper results
         self._wake_window_task: asyncio.Task | None = None  # auto-close wake window on timeout
@@ -160,6 +161,7 @@ class VoiceInput:
 
     def mute(self):
         """Immediately discard incoming audio and purge all buffers."""
+        self._mute_ref_count += 1
         self.is_muted = True
         self._reset_buffers()
         self._transcription_generation += 1  # invalidate any in-flight Whisper result
@@ -169,10 +171,16 @@ class VoiceInput:
                 self.vad_iterator.reset_states()
             except Exception:
                 pass
-        logger.info("[STT] VoiceInput muted and buffers purged")
+        logger.info(f"[STT] VoiceInput muted and buffers purged (ref_count={self._mute_ref_count})")
 
     def unmute(self):
-        """Resume accepting audio and reset state cleanly."""
+        """Resume accepting audio when all mute holders release."""
+        if self._mute_ref_count > 0:
+            self._mute_ref_count -= 1
+        if self._mute_ref_count > 0:
+            logger.info(f"[STT] VoiceInput unmute requested but still held (ref_count={self._mute_ref_count})")
+            return
+
         self._reset_buffers()
         self._transcription_generation += 1  # invalidate any in-flight Whisper result
         self.transcription_in_flight = False
@@ -182,7 +190,7 @@ class VoiceInput:
             except Exception:
                 pass
         self.is_muted = False
-        logger.info("[STT] VoiceInput unmuted")
+        logger.info("[STT] VoiceInput unmuted (ref_count=0)")
 
     async def start_streaming(self, clients):
         if self.running:
@@ -488,6 +496,14 @@ class VoiceInput:
             logger.debug(f"[VoiceInput] State broadcast error: {e}")
 
     def process_speech(self, audio_data):
+        if audio_data is None or len(audio_data) == 0:
+            return None
+        rms = float(np.sqrt(np.mean(audio_data ** 2)))
+        peak = float(np.max(np.abs(audio_data)))
+        if rms < 0.004 and peak < 0.012:
+            logger.debug(f"[Whisper] Discarded low-energy ambient noise: rms={rms:.4f}, peak={peak:.4f}")
+            return None
+
         with wave.open(self.MIC_OUTPUT_PATH, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)

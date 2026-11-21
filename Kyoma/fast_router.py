@@ -140,41 +140,57 @@ SITE_MAP: dict[str, str] = {
     "figma":         "https://www.figma.com",
 }
 
+SITE_DISPLAY_NAMES: dict[str, str] = {
+    "yt": "YouTube",
+    "fb": "Facebook",
+    "chatgpt": "ChatGPT",
+    "github": "GitHub",
+    "stackoverflow": "Stack Overflow",
+    "stack overflow": "Stack Overflow",
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Response templates — randomised so Kyoma doesn't sound like a robot
 # ─────────────────────────────────────────────────────────────────────────────
 
+_last_responses: dict[str, str] = {}
+
 _R: dict[str, list[str]] = {
-    "open_app":        ["{n} opened!",       "Launching {n}.",            "On it — {n} is opening.",    "{n}, coming right up!"],
-    "open_url":        ["Opening {n}!",      "Here you go — {n}.",        "On it, launching {n}.",      "{n} is on its way!"],
-    "web_search":      ["Searching for '{q}' on Google.", "Looking up '{q}'.", "On it — googling '{q}'."],
-    "yt_search":       ["Searching YouTube for '{q}'.", "Looking up '{q}' on YouTube.", "Here you go — searching '{q}' on YouTube."],
-    "close_app":       ["{n} closed.",        "Done — {n} is gone.",       "Closed {n}."],
-    "minimize_app":    ["{n} minimized.",     "Minimized {n}.",            "Out of the way — {n} minimized."],
-    "restore_app":     ["{n} is back.",       "Restored {n}.",             "Bringing {n} back."],
-    "set_volume":      ["Volume set to {v}%.", "Done — volume is now {v}%.", "Set it to {v}%."],
-    "volume_up":       ["Louder!",            "Volume up.",                "Turned it up a notch."],
-    "volume_down":     ["Quieter.",           "Volume down.",              "Turned it down."],
-    "volume_by_up":    ["Volume up by {v}%.", "Increased volume by {v}%.", "Done — {v}% louder."],
-    "volume_by_down":  ["Volume down by {v}%.", "Decreased volume by {v}%.", "Done — {v}% quieter."],
-    "mute":            ["Muted.",             "All quiet now.",            "Silenced.", "Not a peep."],
-    "unmute":          ["Unmuted.",           "Sound is back.",            "Audio restored."],
+    "open_app":        ["{n} opened!", "Launching {n}.", "On it, opening {n}.", "{n}, coming right up!", "Starting {n} now."],
+    "open_url":        ["Opening {n}!", "Here you go, {n}.", "On it, navigating to {n}.", "{n} is on its way!", "Heading over to {n}."],
+    "web_search":      ["Searching for '{q}' on Google.", "Looking up '{q}'.", "Checking '{q}' online now.", "Searching the web for '{q}'."],
+    "yt_search":       ["Searching YouTube for '{q}'.", "Looking up '{q}' on YouTube.", "Finding '{q}' on YouTube.", "Here you go, searching '{q}' on YouTube."],
+    "close_app":       ["{n} closed.", "Done, {n} is closed.", "Closed {n}.", "Dismissed {n}."],
+    "minimize_app":    ["{n} minimized.", "Minimized {n}.", "Out of the way, {n} minimized.", "Tucked {n} away."],
+    "restore_app":     ["{n} is back.", "Restored {n}.", "Bringing {n} back to the front.", "Window restored."],
+    "set_volume":      ["Volume set to {v}%.", "Done, volume is now {v}%.", "Adjusted volume to {v}%.", "Sound level set to {v}%."],
+    "volume_up":       ["Louder!", "Volume turned up.", "Turned it up a notch.", "Increasing volume."],
+    "volume_down":     ["Quieter.", "Volume turned down.", "Lowering the volume.", "Turned it down a notch."],
+    "volume_by_up":    ["Volume up by {v}%.", "Increased volume by {v}%.", "Done, {v}% louder."],
+    "volume_by_down":  ["Volume down by {v}%.", "Decreased volume by {v}%.", "Done, {v}% quieter."],
+    "mute":            ["Muted.", "Audio silenced.", "All quiet now.", "Not a peep."],
+    "unmute":          ["Unmuted.", "Sound is back.", "Audio restored.", "Unmuting the audio."],
     "get_volume":      ["{r}"],
-    "set_brightness":  ["Brightness set to {v}%.", "Done — brightness is at {v}%.", "Set screen to {v}%."],
-    "brightness_up":   ["Brighter!",          "Turned up the brightness.", "A bit brighter."],
-    "brightness_down": ["Dimmed it.",         "Brightness down.",          "A bit darker now."],
-    "brightness_by_up":  ["Brightness up by {v}%.", "Increased brightness by {v}%."],
-    "brightness_by_down":["Brightness down by {v}%.", "Dimmed by {v}%."],
+    "set_brightness":  ["Brightness set to {v}%.", "Done, display is now at {v}%.", "Set screen brightness to {v}%.", "Brightness adjusted to {v}%."],
+    "brightness_up":   ["Brighter!", "Turned up the brightness.", "A bit brighter now.", "Increasing screen brightness."],
+    "brightness_down": ["Dimmed it.", "Brightness down.", "Lowered display brightness.", "A bit darker now."],
+    "brightness_by_up":  ["Brightness up by {v}%.", "Increased brightness by {v}%.", "Screen is {v}% brighter."],
+    "brightness_by_down":["Brightness down by {v}%.", "Dimmed display by {v}%.", "Screen is {v}% darker."],
     "get_brightness":  ["{r}"],
-    "lock":            ["Locking the screen.", "Screen locked.",           "Locked up."],
-    "screenshot":      ["Screenshot saved!",  "Got it — screenshot taken.", "Captured and saved."],
-    "play":            ["Playing.",           "Resumed.",                  "Playing."],
-    "pause":           ["Paused.",            "Paused.",                   "Paused."],
-    "stop":            ["Stopped.",           "Stopped.",                  "Stopped."],
-    "play_pause":      ["Done.",              "Playback updated."],
-    "next_track":      ["Next track.",        "Skipping ahead.",           "Playing the next one."],
-    "prev_track":      ["Previous track.",    "Going back one.",           "Playing the previous one."],
-    "restart_track":   ["Playing from the beginning.", "Back to the beginning.", "Restarting from the top."],
+    "lock":            ["Locking the screen.", "Screen locked.", "System locked up.", "Securing the desktop."],
+    "screenshot":      ["Screenshot saved!", "Got it, screenshot captured.", "Screen captured and saved.", "Snapshot saved successfully."],
+    "play":            ["Resuming playback.", "Playing audio.", "Resumed.", "Continuing playback."],
+    "pause":           ["Paused.", "Playback paused.", "Holding audio here.", "Paused playback."],
+    "stop":            ["Stopped.", "Playback stopped.", "Stopped playback."],
+    "play_pause":      ["Toggled playback.", "Playback updated.", "Media state switched."],
+    "next_track":      ["Next track.", "Skipping ahead.", "Playing the next track.", "On to the next one."],
+    "prev_track":      ["Previous track.", "Going back one track.", "Playing the previous one."],
+    "restart_track":   ["Playing from the beginning.", "Restarting from the top.", "Track restarted."],
+    "greeting":        ["Hello! How can I help you today?", "Hey there! What can I do for you?", "Hi! Ready when you are.", "Greetings! How may I assist?"],
+    "name":            ["I'm KYOMA, your AI desktop companion.", "I am KYOMA, your personal assistant.", "KYOMA here, at your service."],
+    "doing":           ["I'm doing great and ready to assist.", "All systems running smoothly and ready to help.", "Doing well, thanks for asking! What's on your mind?"],
+    "thanks":          ["You're very welcome!", "Happy to help!", "Anytime! Let me know if you need anything else.", "My pleasure!"],
+    "bye":             ["Goodbye! Have a great day.", "See you later!", "Take care! Standing by whenever you need me.", "Farewell! Have a wonderful day."],
     "get_time":        ["{r}"],
     "get_date":        ["{r}"],
     "get_battery":     ["{r}"],
@@ -185,12 +201,16 @@ _R: dict[str, list[str]] = {
     "disk_usage":      ["{r}"],
     "system_info":     ["{r}"],
     "error":           ["Something went wrong: {e}", "I hit an error: {e}"],
+    "sleep":           ["Going to sleep now. Call me whenever you need me.", "Entering standby mode. Just say Hey Kyoma to wake me.", "Standby mode activated. See you soon!"],
 }
 
 def _say(key: str, **kw) -> str:
-    """Pick a random response template and fill it in."""
+    """Pick a non-repeating random response template and format it."""
     templates = _R.get(key, ["{r}"])
-    tpl = random.choice(templates)
+    last = _last_responses.get(key)
+    choices = [t for t in templates if t != last] if len(templates) > 1 else templates
+    tpl = random.choice(choices)
+    _last_responses[key] = tpl
     try:
         return tpl.format(**{k: str(v) for k, v in kw.items()})
     except KeyError:
@@ -222,25 +242,31 @@ _RE_BRI_DN     = re.compile(r"\b(?:brightness\s+down|dimmer|dim\s+(?:(?:the\s+)?
 _RE_GET_BRI    = re.compile(r"\b(?:what(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?brightness|(?:check|get|current)\s+brightness|brightness\s+level)\b", _F)
 
 # ── Media ─────────────────────────────────────────────────────────────────────
-_RE_PAUSE      = re.compile(r"^(?:pause(?:\s+(?:it|the\s+(?:video|song|music|track)|video|song|music|playback))?|stop(?:\s+(?:the\s+(?:video|song|music|track)|video|song|music|playback))?)$", _F)
-_RE_PLAY       = re.compile(r"^(?:play(?:\s+(?:it|the\s+(?:video|song|music|track)|video|song|music|playback))?|resume(?:\s+(?:it|the\s+(?:video|song|music|track)|video|song|music|playback))?|continue(?:\s+(?:the\s+(?:video|song|music|track)|video|song|music|playback))?)$", _F)
+_RE_PAUSE      = re.compile(r"^(?:(?:media\s+)?pause(?:\s+(?:it|the\s+(?:video|song|music|track|youtube)|video|song|music|track|youtube))?|(?:media\s+)?stop(?:\s+(?:the\s+(?:video|song|music|track|youtube)|video|song|music|track|youtube))?)$", _F)
+_RE_PLAY       = re.compile(r"^(?:(?:media\s+)?play(?:\s+(?:it|the\s+(?:video|song|music|track|youtube)|video|song|music|track|youtube))?|resume(?:\s+(?:it|the\s+(?:video|song|music|track|youtube)|video|song|music|track|youtube))?|continue(?:\s+(?:the\s+(?:video|song|music|track|youtube)|video|song|music|track|youtube))?)$", _F)
 _RE_PLAY_PAUSE = re.compile(r"^(?:toggle\s+(?:play|media|music|playback)|play\s*[/\\]\s*pause)$", _F)
 _RE_NEXT       = re.compile(r"\b(?:next(?:\s+(?:one|track|song|music))?|skip(?:\s+(?:this|one|track|song|music))?|forward(?:\s+track)?)\b", _F)
 _RE_PREV       = re.compile(r"\b(?:previous(?:\s+(?:one|track|song|music))?|prev(?:\s+(?:one|track|song|music))?|go\s+back(?:\s+(?:to\s+(?:the\s+)?previous\s+(?:track|song)|a\s+(?:track|song)))?|last\s+(?:track|song))\b", _F)
 _RE_RESTART    = re.compile(r"\b(?:restart(?:\s+(?:track|song|music))?|replay(?:\s+(?:this|track|song|music))?|from\s+(?:the\s+)?(?:beginning|start)|start\s+(?:this\s+)?over|play\s+(?:the\s+(?:song|video|track)\s+)?again|beginning\s+of\s+(?:track|song))\b", _F)
 
 # ── Screenshot & Lock ─────────────────────────────────────────────────────────
-_RE_SCREENSHOT = re.compile(r"\b(?:(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?|grab\s+(?:a\s+)?)?(?:screenshot|screen\s*shot|ss)(?:\s+(?:and\s+)?save\s+it\s+as\s+([a-zA-Z0-9_\-\s]+?))?(?:\s+(?:now|please))?|screen(?:\s+)?shot|screen\s+capture|screengrab|capture\s+screen|grab\s+screen)\b", _F)
+_RE_SCREENSHOT = re.compile(r"^(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?|grab\s+(?:a\s+)?)?(?:screenshot|screen\s*shot|ss)(?:\s+(?:and\s+)?save\s+it\s+as\s+([a-zA-Z0-9_\-\s]+?))?(?:\s+(?:now|please))?$|^(?:take\s+(?:a\s+)?(?:screenshot|screen\s*shot|ss)|screengrab|capture\s+screen|grab\s+screen)[\!\.\?\s]*$", _F)
+# ── Standby / Sleep & System Risk Patterns ─────────────────────────────────────
+_RE_SLEEP        = re.compile(r"^(?:go\s+to\s+sleep|sleep\s+mode|standby|enter\s+standby|take\s+a\s+nap)[\!\.\?\s]*$", _F)
+_RE_SYSTEM_RISK  = re.compile(r"\b(shutdown|shut\s+down|power\s+off|restart|reboot|hibernate)\b", _F)
+_RE_BARE_ADJUST  = re.compile(r"^(increase|raise|turn\s+up|boost|decrease|lower|turn\s+down|reduce|drop|dim)(?:\s+(?:it|that|this))?[\!\.\?\s]*$", _F)
+_RE_BARE_REMIND  = re.compile(r"^(?:set\s+(?:a\s+)?)?(?:reminder|alarm)[\!\.\?\s]*$", _F)
 # ── Reminders & Capabilities Patterns ─────────────────────────────────────────
 _RE_REMINDERS  = re.compile(r"\b(?:(?:list|show|view|check|read|get)(?:\s+all)?(?:\s+my)?\s+(?:reminders?|remainings?)|(?:reminders?|remainings?)\s+(?:list|status)|what\s+are\s+my\s+(?:reminders?|remainings?)|do\s+i\s+have\s+any\s+(?:reminders?|remainings?))\b", _F)
 _RE_GREETING     = re.compile(r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening)|howdy|greetings)[\!\.\?\s]*$", _F)
 _RE_SAY_HI_TO    = re.compile(r"\b(?:say\s+(?:hi|hello)\s+to|greet)\s+([a-zA-Z\s]+)[\!\.\?\s]*$", _F)
-_RE_NAME         = re.compile(r"\b(?:what(?:'s|\s+is)\s+your\s+name|who\s+are\s+you|introduce\s+yourself)\b", _F)
+_RE_NAME         = re.compile(r"^(?:what(?:'s|\s+is)\s+your\s+name|who\s+are\s+you|introduce\s+yourself)[\!\.\?\s]*$", _F)
 _RE_DOING        = re.compile(r"^(?:what\s+are\s+you\s+doing|how\s+are\s+you(?:\s+doing)?|how's\s+it\s+going)[\!\.\?\s]*$", _F)
 _RE_THANKS       = re.compile(r"^(?:thanks|thank\s+you(?:\s+very\s+much|\s+so\s+much)?)[\!\.\?\s]*$", _F)
 _RE_BYE          = re.compile(r"^(?:bye|goodbye|see\s+you(?:\s+later)?|farewell|exit)[\!\.\?\s]*$", _F)
+_RE_TYPO_CORRECT = re.compile(r"\b(?:i\s+(?:miss[\s\-]?typed|misstyped|mistyped|meant\s+to\s+(?:say|type)|meant)|that\s+was\s+a\s+typo|typo\s+sorry|sorry\s+typo)\b", _F)
 _RE_OPEN_BARE    = re.compile(r"^(?:open|launch|start)[\!\.\?\s]*$", _F)
-_RE_WHO          = re.compile(r"\b(?:who\s+are\s+you|introduce\s+yourself)\b", _F)
+_RE_WHO          = re.compile(r"^(?:who\s+are\s+you|tell\s+me\s+about\s+yourself|introduce\s+yourself|what\s+are\s+you|describe\s+yourself)[\!\.\?\s]*$", _F)
 _RE_CAPABILITIES = re.compile(r"\b(?:what\s+(?:all\s+)?(?:can\s+you\s+do|you\s+can\s+do)|what\s+are\s+your\s+(?:capabilities|features)|state\s+your\s+features|list\s+your\s+features|help\s+me)\b", _F)
 _RE_STATUS     = re.compile(r"\b(?:what(?:'s|\s+is)\s+(?:the\s+)?status|system\s+status|pc\s+status|device\s+status|^status$)\b", _F)
 
@@ -258,7 +284,7 @@ _RE_REMIND_FOR_TIME = re.compile(
 _RE_REMIND_IN_TO = re.compile(
     r"\b(?:set\s+(?:a\s+)?)?(?:reminder|remaining)\s+(?:in|and|after)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)\s+to\s+(.+?)[\.\?\!]*$", _F)
 _RE_REMIND_TO_IN = re.compile(
-    r"\b(?:remind|remaining)\s+(?:me\s+)?to\s+(.+?)\s+(?:in|and|after)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)[\.\?\!]*$", _F)
+    r"\b(?:(?:set\s+(?:a\s+)?)?reminder|(?:remind|remaining)\s+(?:me\s+)?)\s*to\s+(.+?)\s+(?:in|and|after)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(mins?|minutes?|hours?|hrs?|seconds?|secs?)[\.\?\!]*$", _F)
 
 
 
@@ -365,6 +391,10 @@ def _normalize_speech_text(text: str) -> str:
     if not text:
         return ""
     t = text.strip()
+    # Normalize common STT phonetic transcription errors
+    # e.g., Whisper sometimes transcribes "media pause" as "media pass" or "media pose"
+    t = re.sub(r'\bmedia\s+pass\b', 'media pause', t, flags=re.I)
+    t = re.sub(r'\bmedia\s+pose\b', 'media pause', t, flags=re.I)
     # Replace internal commas that separate words, e.g. "Reduce, Brightness" -> "Reduce Brightness"
     # but avoid stripping if comma was between digits or special queries
     t = re.sub(r'(\w+)\s*,\s*(\w+)', r'\1 \2', t)
@@ -372,6 +402,8 @@ def _normalize_speech_text(text: str) -> str:
     t = re.sub(r'^[,\.\?!;:\s\-]+', '', t)
     t = re.sub(r'[,\.;:\-]+$', '', t)
     # Collapse multiple whitespaces
+    # Strip conversational filler words / polite prefixes at beginning of utterance
+    t = re.sub(r'^(?:(?:um|uh|er|ah|please|can\s+you\s+(?:please\s+)?|could\s+you\s+(?:please\s+)?|would\s+you\s+(?:please\s+)?)\s+)+', '', t, flags=re.I)
     t = re.sub(r'\s+', ' ', t).strip()
     return t
 
@@ -384,6 +416,7 @@ def route(text: str) -> Tuple[Optional[str], bool]:
         (response_text, True)   — command matched & executed, speak this text
         (None, False)           — no match, caller should fall through to LLM
     """
+    global _tools
     if not text or not text.strip():
         return None, False
     try:
@@ -394,6 +427,11 @@ def route(text: str) -> Tuple[Optional[str], bool]:
         
         # 1. Check for compound commands FIRST
         # Shared action: "increase brightness and volume" or "decrease volume and brightness"
+        # 1. If the command is an explicit parameterized screenshot ("take a screenshot and save it as..."),
+        # handle it directly without splitting on the conjunction "and".
+        if _RE_SCREENSHOT.search(cleaned):
+            return _route(cleaned)
+
         m_inc = re.match(r'^(increase|raise|turn up|boost)\s+(brightness|volume)\s+(?:and|also)\s+(brightness|volume)[\.\?\!]*$', cleaned, re.IGNORECASE)
         if m_inc:
             action, first, second = m_inc.group(1), m_inc.group(2), m_inc.group(3)
@@ -410,7 +448,6 @@ def route(text: str) -> Tuple[Optional[str], bool]:
 
         if len(parts) > 1:
             # Multi-command check: Dry-run check first to prevent partial execution side-effects
-            global _tools
             real_tools = _get_tools()  # Force load if not already loaded
             backed_up_tools = dict(_tools)
             
@@ -443,6 +480,12 @@ def route(text: str) -> Tuple[Optional[str], bool]:
                     if matched and resp:
                         responses.append(resp)
                 return _natural_join(responses), True
+            else:
+                # Multi-part conjunction query where some part did not match an exact tool:
+                # Do NOT fall through to partial action matching! Fall through to Ollama LLM
+                # so compound/complex sentences like "Set a reminder and we'll take a screenshot"
+                # or "What is your name and explain about yourself?" are processed coherently.
+                return None, False
 
         # 2. Check direct single-command match if not a multi-command or if multi-command didn't match all parts
         return _route(cleaned)
@@ -455,11 +498,104 @@ def route(text: str) -> Tuple[Optional[str], bool]:
 def _route(text: str) -> Tuple[Optional[str], bool]:
     t = _get_tools()
 
+    # ── SLEEP / STANDBY ───────────────────────────────────────────────────────
+    if _RE_SLEEP.search(text):
+        try:
+            from pending_actions import clear_pending_action
+            clear_pending_action()
+        except Exception:
+            pass
+        return _say("sleep"), True
+
+    # ── SYSTEM RISK GUARD (Shutdown, Restart, Hibernate) ──────────────────────
+    if m_risk := _RE_SYSTEM_RISK.search(text):
+        risk_cmd = m_risk.group(1).lower().replace(" ", "")
+        if "shut" in risk_cmd or "power" in risk_cmd:
+            norm_cmd = "shutdown"
+        elif "restart" in risk_cmd or "reboot" in risk_cmd:
+            norm_cmd = "restart"
+        else:
+            norm_cmd = "hibernate"
+        try:
+            from pending_actions import set_pending_action
+            set_pending_action(
+                action_type="system_risk_confirmation",
+                data={"command": norm_cmd},
+                prompt_to_user=f"Are you sure you want to {norm_cmd} your PC? Please say yes to confirm."
+            )
+        except Exception:
+            pass
+        return f"Are you sure you want to {norm_cmd} your PC? Please say yes to confirm.", True
+
+    # ── CONTEXTUAL SLOT-FILLING: BARE ADJUSTMENT ("Increase" / "Decrease") ──
+    if m_adj := _RE_BARE_ADJUST.match(text):
+        adj_word = m_adj.group(1).lower()
+        direction = "up" if adj_word in ("increase", "raise", "turn up", "boost") else "down"
+        try:
+            from pending_actions import get_last_controlled_target, record_controlled_target
+            last_target = get_last_controlled_target()
+        except Exception:
+            last_target = None
+
+        if last_target == "brightness":
+            try:
+                from display_control import brightness_up, brightness_down, get_brightness
+                if direction == "up":
+                    brightness_up(10)
+                else:
+                    brightness_down(10)
+                b = get_brightness()
+                m_b = re.search(r"(\d+)", str(b))
+                b_val = m_b.group(1) if m_b else b
+                record_controlled_target("brightness")
+                return f"{'Increased' if direction == 'up' else 'Decreased'} brightness to {b_val}%.", True
+            except Exception as e:
+                return f"Could not adjust brightness: {e}", True
+        elif last_target == "volume":
+            try:
+                from volume_control import change_volume, get_volume
+                delta = 10 if direction == "up" else -10
+                change_volume(delta)
+                v = get_volume()
+                record_controlled_target("volume")
+                return f"{'Increased' if direction == 'up' else 'Decreased'} volume to {v}%.", True
+            except Exception as e:
+                return f"Could not adjust volume: {e}", True
+
+        try:
+            from pending_actions import set_pending_action
+            set_pending_action(
+                action_type="slot_fill_adjustment",
+                data={"direction": direction},
+                prompt_to_user=f"{adj_word.title()} what? Volume or brightness?"
+            )
+        except Exception:
+            pass
+        return f"{adj_word.title()} volume or brightness?", True
+
+    # ── CONTEXTUAL SLOT-FILLING: BARE REMINDER ("Set a reminder") ────────────
+    if _RE_BARE_REMIND.match(text):
+        try:
+            from pending_actions import set_pending_action
+            set_pending_action(
+                action_type="slot_fill_reminder_what",
+                data={},
+                prompt_to_user="What would you like me to remind you about?"
+            )
+        except Exception:
+            pass
+        return "What would you like me to remind you about?", True
+
     # ── VOLUME ────────────────────────────────────────────────────────────────
 
     if m := _RE_SET_VOL.search(text):
         level = _clamp(int(m.group(1)))
         _extract_result(t["set_volume"](level))
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("volume")
+        except Exception:
+            pass
         return _say("set_volume", v=level), True
 
     if m := _RE_VOL_UP_BY.search(text):
@@ -467,6 +603,11 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         current = t["get_volume"]()
         new_level = _clamp(int(current) + amount)
         _extract_result(t["set_volume"](new_level))
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("volume")
+        except Exception:
+            pass
         return _say("volume_by_up", v=amount), True
 
     if m := _RE_VOL_DN_BY.search(text):
@@ -474,27 +615,57 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         current = t["get_volume"]()
         new_level = _clamp(int(current) - amount)
         _extract_result(t["set_volume"](new_level))
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("volume")
+        except Exception:
+            pass
         return _say("volume_by_down", v=amount), True
 
     if _RE_VOL_UP.search(text):
         _extract_result(t["change_volume"]("up"))
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("volume")
+        except Exception:
+            pass
         return _say("volume_up"), True
 
     if _RE_VOL_DN.search(text):
         _extract_result(t["change_volume"]("down"))
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("volume")
+        except Exception:
+            pass
         return _say("volume_down"), True
 
     if _RE_MUTE.search(text):
         _extract_result(t["mute_volume"]())
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("volume")
+        except Exception:
+            pass
         return _say("mute"), True
 
     if _RE_UNMUTE.search(text):
         _extract_result(t["unmute_volume"]())
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("volume")
+        except Exception:
+            pass
         return _say("unmute"), True
 
     if _RE_GET_VOL.search(text):
         level = t["get_volume"]()
         result = f"Volume is at {level}%."
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("volume")
+        except Exception:
+            pass
         return _say("get_volume", r=result), True
 
     # ── BRIGHTNESS ────────────────────────────────────────────────────────────
@@ -502,28 +673,58 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
     if m := _RE_SET_BRI.search(text):
         level = _clamp(int(m.group(1)))
         _extract_result(t["set_brightness"](level))
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("brightness")
+        except Exception:
+            pass
         return _say("set_brightness", v=level), True
 
     if m := _RE_BRI_UP_BY.search(text):
         step = _clamp(int(m.group(1)), 1, 100)
         _extract_result(t["brightness_up"](step))
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("brightness")
+        except Exception:
+            pass
         return _say("brightness_by_up", v=step), True
 
     if m := _RE_BRI_DN_BY.search(text):
         step = _clamp(int(m.group(1)), 1, 100)
         _extract_result(t["brightness_down"](step))
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("brightness")
+        except Exception:
+            pass
         return _say("brightness_by_down", v=step), True
 
     if _RE_BRI_UP.search(text):
         _extract_result(t["brightness_up"]())
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("brightness")
+        except Exception:
+            pass
         return _say("brightness_up"), True
 
     if _RE_BRI_DN.search(text):
         _extract_result(t["brightness_down"]())
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("brightness")
+        except Exception:
+            pass
         return _say("brightness_down"), True
 
     if _RE_GET_BRI.search(text):
         result = _extract_result(t["get_brightness"]())
+        try:
+            from pending_actions import record_controlled_target
+            record_controlled_target("brightness")
+        except Exception:
+            pass
         return _say("get_brightness", r=result), True
 
     # ── MEDIA ─────────────────────────────────────────────────────────────────
@@ -558,11 +759,19 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
     # ── SCREENSHOT & LOCK ─────────────────────────────────────────────────────
 
     if m := _RE_SCREENSHOT.search(text):
-        name = m.group(1).strip() if m.group(1) else None
-        res = t["take_screenshot_save"](name=name) if name else t["take_screenshot_save"]()
-        if name:
-            return f"Screenshot saved as {name}.", True
-        return "Screenshot saved.", True
+        raw_name = m.group(1).strip() if m.group(1) else None
+        # Discard false filename captures like "it", "it's working", or clauses
+        if raw_name:
+            # Check against noise words or contractions
+            clean_check = raw_name.lower().split()[0]
+            if clean_check in {"it", "it's", "that", "this", "working", "something"}:
+                raw_name = None
+            elif not _is_plausible_name(raw_name):
+                raw_name = None
+        res = t["take_screenshot_save"](name=raw_name) if raw_name else t["take_screenshot_save"]()
+        if raw_name:
+            return f"Screenshot saved as {raw_name}.", True
+        return _say("screenshot"), True
 
     if _RE_LOCK.search(text):
         is_refused, refusal = check_demo_mode_refusal("lock_screen")
@@ -669,19 +878,21 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         return f"Hello, {target}! Nice to meet you.", True
 
     if _RE_GREETING.match(text):
-        return "Hello! How can I help you today?", True
+        return _say("greeting"), True
 
     if _RE_NAME.search(text):
-        return "I'm KYOMA, your AI desktop companion.", True
+        return _say("name"), True
 
     if _RE_DOING.search(text):
-        return "I'm doing well and ready to help.", True
+        return _say("doing"), True
 
     if _RE_THANKS.match(text):
-        return "You're welcome!", True
+        return _say("thanks"), True
 
     if _RE_BYE.match(text):
-        return "Goodbye! Have a great day.", True
+        return _say("bye"), True
+    if _RE_TYPO_CORRECT.search(text):
+        return "Got it, thanks for clarifying!", True
 
     if _RE_OPEN_BARE.match(text):
         return None, False
@@ -740,7 +951,8 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         if name_raw in SITE_MAP:
             url = SITE_MAP[name_raw]
             t["open_browser"](url)
-            return _say("open_url", n=name_raw.title()), True
+            display_name = SITE_DISPLAY_NAMES.get(name_raw, name_raw.title())
+            return _say("open_url", n=display_name), True
 
     # ── CLOSE APP ────────────────────────────────────────────────────────────
 
