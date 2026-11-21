@@ -1,0 +1,152 @@
+[
+  {
+    "index": 1,
+    "phrase": "What all can you do?",
+    "route": "ollama",
+    "latency_s": 2.026,
+    "spoken_text": "I control volume, brightness, apps, screenshots, reminders, system info, and web search.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 2,
+    "phrase": "What is the status?",
+    "route": "fast_router",
+    "latency_s": 0.001,
+    "spoken_text": "It's 11:21:21 PM, and the battery is at 76 percent and charging.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 3,
+    "phrase": "Tell me the time and date.",
+    "route": "fast_router",
+    "latency_s": 0.001,
+    "spoken_text": "The current time is 11:21:21 PM, today's date is November 17, 2026.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 4,
+    "phrase": "Time and battery.",
+    "route": "fast_router",
+    "latency_s": 0.0,
+    "spoken_text": "The current time is 11:21:21 PM, battery at 76% and charging.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 5,
+    "phrase": "Take a SS and save it as Kyoma.",
+    "route": "ollama",
+    "latency_s": 0.215,
+    "spoken_text": "Screenshot saved as Kyoma.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 6,
+    "phrase": "Take a screenshot.",
+    "route": "fast_router",
+    "latency_s": 0.178,
+    "spoken_text": "Screenshot saved.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 7,
+    "phrase": "Set a reminder in 1 minute to drink water.",
+    "route": "fast_router",
+    "latency_s": 0.017,
+    "spoken_text": "Reminder set for drink water today at 11:22 PM.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 8,
+    "phrase": "Remind me to submit assignment in 2 minutes.",
+    "route": "fast_router",
+    "latency_s": 0.014,
+    "spoken_text": "Reminder set for submit assignment today at 11:23 PM.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 9,
+    "phrase": "List my reminders.",
+    "route": "fast_router",
+    "latency_s": 0.004,
+    "spoken_text": "You have 2 upcoming reminders: drink water today at 11:22 PM, and submit assignment today at 11:23 PM.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 10,
+    "phrase": "Increase brightness and volume.",
+    "route": "ollama",
+    "latency_s": 0.371,
+    "spoken_text": "Turned up the brightness, volume up.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 11,
+    "phrase": "Set brightness to 60 and volume to 80.",
+    "route": "fast_router",
+    "latency_s": 0.105,
+    "spoken_text": "Set screen to 60%, done \u2014 volume is now 80%.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 12,
+    "phrase": "How are you?",
+    "route": "fast_router",
+    "latency_s": 0.004,
+    "spoken_text": "I'm doing well and ready to help.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 13,
+    "phrase": "Who are you?",
+    "route": "fast_router",
+    "latency_s": 0.003,
+    "spoken_text": "I'm KYOMA, your AI desktop companion.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 14,
+    "phrase": "Open Notepad.",
+    "route": "fast_router",
+    "latency_s": 0.067,
+    "spoken_text": "Notepad opened!",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  },
+  {
+    "index": 15,
+    "phrase": "Open Calculator.",
+    "route": "fast_router",
+    "latency_s": 0.016,
+    "spoken_text": "Launching Calculator.",
+    "error": null,
+    "leakage": [],
+    "leak_detected": false
+  }
+]

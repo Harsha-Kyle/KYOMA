@@ -1,0 +1,174 @@
+{
+  "test_cases": [
+    {
+      "index": 1,
+      "phrase": "Hey Kyoma, remind me to drink water in one minute.",
+      "type": "clean",
+      "route": "fast_router",
+      "latency_s": 1.408,
+      "spoken_output": "Reminder set for drink water today at 12:09 AM.",
+      "word_count": 9,
+      "passes_25_words": true,
+      "no_dot_and": true,
+      "error": null
+    },
+    {
+      "index": 2,
+      "phrase": "What is the time, date and battery level?",
+      "type": "clean",
+      "route": "fast_router",
+      "latency_s": 0.0002,
+      "spoken_output": "The current time is 12:08:06 AM, battery at 75% and charging.",
+      "word_count": 11,
+      "passes_25_words": true,
+      "no_dot_and": true,
+      "error": null
+    },
+    {
+      "index": 3,
+      "phrase": "Increase brightness to 60 percent and volume to 80 percent.",
+      "type": "clean",
+      "route": "fast_router",
+      "latency_s": 0.1015,
+      "spoken_output": "Set screen to 60%, done \u2014 volume is now 80%.",
+      "word_count": 10,
+      "passes_25_words": true,
+      "no_dot_and": true,
+      "error": null
+    },
+    {
+      "index": 4,
+      "phrase": "what all you can do?",
+      "type": "clean",
+      "route": "fast_router",
+      "latency_s": 0.0001,
+      "spoken_output": "I control volume, brightness, apps, screenshots, reminders, system info, and web search.",
+      "word_count": 12,
+      "passes_25_words": true,
+      "no_dot_and": true,
+      "error": null
+    },
+    {
+      "index": 5,
+      "phrase": "increase brightness for me.",
+      "type": "clean",
+      "route": "fast_router",
+      "latency_s": 0.0383,
+      "spoken_output": "Brighter!",
+      "word_count": 1,
+      "passes_25_words": true,
+      "no_dot_and": true,
+      "error": null
+    },
+    {
+      "index": 6,
+      "phrase": "take a SS and save it as Kyoma",
+      "type": "clean",
+      "route": "fast_router",
+      "latency_s": 0.2159,
+      "spoken_output": "Screenshot saved as Kyoma.",
+      "word_count": 4,
+      "passes_25_words": true,
+      "no_dot_and": true,
+      "error": null
+    },
+    {
+      "index": 7,
+      "phrase": "what is the status?",
+      "type": "clean",
+      "route": "fast_router",
+      "latency_s": 0.0003,
+      "spoken_output": "It's 12:08:06 AM, and the battery is at 75 percent and charging.",
+      "word_count": 12,
+      "passes_25_words": true,
+      "no_dot_and": true,
+      "error": null
+    },
+    {
+      "index": 8,
+      "phrase": "you sit, remind you to drink water",
+      "type": "whisper_transcribed",
+      "route": "fallthrough_to_llm",
+      "latency_s": 0.0001,
+      "spoken_output": "",
+      "word_count": 0,
+      "passes_25_words": true,
+      "no_dot_and": true,
+      "error": null
+    },
+    {
+      "index": 9,
+      "phrase": "Increase brightness and volume",
+      "type": "clean",
+      "route": "fast_router",
+      "latency_s": 0.0667,
+      "spoken_output": "A bit brighter, volume up.",
+      "word_count": 5,
+      "passes_25_words": true,
+      "no_dot_and": true,
+      "error": null
+    },
+    {
+      "index": 10,
+      "phrase": "60% and 80%",
+      "type": "whisper_transcribed",
+      "route": "fallthrough_to_llm",
+      "latency_s": 0.0001,
+      "spoken_output": "",
+      "word_count": 0,
+      "passes_25_words": true,
+      "no_dot_and": true,
+      "error": null
+    }
+  ],
+  "conversation_turns": [
+    {
+      "turn": 1,
+      "input": "Lock the screen please.",
+      "route": "fast_router",
+      "latency_s": 0.0001,
+      "output": "Locking the screen is disabled during demo mode to ensure a smooth presentation.",
+      "contaminated": false
+    },
+    {
+      "turn": 2,
+      "input": "What time is it?",
+      "route": "fast_router",
+      "latency_s": 0.0001,
+      "output": "The current time is 12:08:06 AM",
+      "contaminated": false
+    },
+    {
+      "turn": 3,
+      "input": "Close all applications.",
+      "route": "fast_router",
+      "latency_s": 0.0003,
+      "output": "Closing all applications is disabled during demo mode for presentation safety.",
+      "contaminated": false
+    },
+    {
+      "turn": 4,
+      "input": "Set volume to 50 percent.",
+      "route": "fast_router",
+      "latency_s": 0.0242,
+      "output": "Done \u2014 volume is now 50%.",
+      "contaminated": false
+    },
+    {
+      "turn": 5,
+      "input": "60% and 80%",
+      "route": "fallthrough",
+      "latency_s": 0.0001,
+      "output": null,
+      "contaminated": false
+    },
+    {
+      "turn": 6,
+      "input": "Tell me the date.",
+      "route": "fast_router",
+      "latency_s": 0.0001,
+      "output": "Today's date is November 18, 2026",
+      "contaminated": false
+    }
+  ]
+}
