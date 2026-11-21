@@ -1,9 +1,10 @@
+import { splitIntoSpokenSentences } from './tts-sanitizer';
 import { HistoryItem } from './types';
 import { pipelineManager } from './pipelineManager';
-import { cut5 } from './utils';
 import { createNewSession, updateSession, fetchSessionContent } from './sessionManager';
 import { apiFetch } from './api-client';
 import { globalStateManager } from './globalStateManager';
+import { getCurrentGenerationId, getNextGenerationId } from './generationId';
 
 type ChatUpdateCallback = (messages: HistoryItem[]) => void;
 
@@ -94,7 +95,6 @@ export class ChatManager {
 
     public setEnableMemoryRetrieval(enabled: boolean) {
         this.enableMemoryRetrieval = enabled;
-        // Clear retrieved context immediately when memory retrieval is disabled
         if (!enabled) {
             this.setRetrievedContext('');
         }
@@ -121,12 +121,31 @@ export class ChatManager {
         return pipelineManager.subscribe(handlePipelineUpdate);
     }
 
+    /**
+     * Generation-safe cleanup path across success, error, abort and stop.
+     * Clears thinking state, prunes empty assistant placeholders, and notifies UI.
+     */
+    public finishTurn(genId?: number) {
+        if (genId !== undefined && getCurrentGenerationId() !== genId) {
+            return;
+        }
+        // Remove trailing empty assistant placeholder if present
+        if (this.messages.length > 0 && this.messages[this.messages.length - 1].role === 'assistant') {
+            const last = this.messages[this.messages.length - 1];
+            if (!last.content || last.content.trim() === '') {
+                this.messages.pop();
+                this.notifySubscribers('onMessagesChange');
+            }
+        }
+        globalStateManager.updateState('isLLMThinking', false);
+    }
+
     public stopGeneration() {
         if (this.abortController) {
             this.abortController.abort();
             this.abortController = null;
         }
-        globalStateManager.updateState('isLLMThinking', false);
+        this.finishTurn();
     }
 
     public handleInterrupt() {
@@ -139,7 +158,6 @@ export class ChatManager {
         return false;
     }
 
-
     public async sendMessage(
         input: string, 
         taskId: string | null = null,
@@ -148,9 +166,14 @@ export class ChatManager {
         if (!taskId) taskId = null;
         else pipelineManager.markLLMStarted(taskId);
 
+        // Assign a new generation ID for this turn
+        const genId = getNextGenerationId();
         this.abortController = new AbortController();
         const userMessage: HistoryItem = { role: 'user', content: input };
-        const history = this.messages.slice(-30);
+
+        // Maintain the last 4 user/assistant turns (8 messages) for LLM context, excluding transitory search acks
+        const nonAckMessages = this.messages.filter(m => !m.content?.includes('<<<KYOMA_SEARCH_SPLIT>>>'));
+        const history = nonAckMessages.slice(-8);
         
         this.messages.push(userMessage);
         this.notifySubscribers('onMessagesChange');
@@ -179,40 +202,26 @@ export class ChatManager {
                     console.warn('Failed to fetch context:', ctxErr);
                 }
             } else {
-                // Clear retrieved context when memory retrieval is disabled
                 this.setRetrievedContext('');
             }
 
-            // Assemble system prompt with labeled sections
-            let systemPromptWithContext = '';
-            
-            // Add vision context if available
-            const visionSection = this.visionPrompt.trim() ? 
-                `[SCREEN CONTEXT]\n${this.visionPrompt}\n\n` : '';
-            
-            // Add OCR context if available    
-            const ocrSection = this.ocrPrompt.trim() ? 
-                `[SCREEN TEXT]\n${this.ocrPrompt}\n\n` : '';
-            
-            // Add memory context if available
-            const contextSection = contextText.trim() ? 
-                `[RETRIEVED MEMORY]\n${contextText}\n\n` : '';
-            
-            // Add base instructions
-            const instructionsSection = `[INSTRUCTIONS]\n${this.systemPrompt}\n\n`;
-            
-            // Combine all sections
-            systemPromptWithContext = visionSection + ocrSection + contextSection + instructionsSection;
+            // Check generation validity
+            if (getCurrentGenerationId() !== genId) {
+                console.log(`[ChatManager] Generation ${genId} cancelled before LLM request.`);
+                this.finishTurn(genId);
+                return;
+            }
 
-            // Set the retrieved context and full system prompt
+            // Assemble system prompt with labeled sections
+            const visionSection = this.visionPrompt.trim() ? `[SCREEN CONTEXT]\n${this.visionPrompt}\n\n` : '';
+            const ocrSection = this.ocrPrompt.trim() ? `[SCREEN TEXT]\n${this.ocrPrompt}\n\n` : '';
+            const contextSection = contextText.trim() ? `[RETRIEVED MEMORY]\n${contextText}\n\n` : '';
+            const instructionsSection = `[INSTRUCTIONS]\n${this.systemPrompt}\n\n`;
+            const systemPromptWithContext = visionSection + ocrSection + contextSection + instructionsSection;
+
             this.setRetrievedContext(contextText);
             this.setFullSystemPrompt(systemPromptWithContext);
 
-            console.log("getCompletion", JSON.stringify({
-                text: input,
-                history: history,
-                systemPrompt: systemPromptWithContext,
-            }));
             const response = await apiFetch('/api/completion', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -224,9 +233,16 @@ export class ChatManager {
                 signal: this.abortController.signal
             });
 
+            if (getCurrentGenerationId() !== genId) {
+                console.log(`[ChatManager] Generation ${genId} cancelled during response arrival.`);
+                this.finishTurn(genId);
+                return;
+            }
+
             if (!response.ok) {
-                const errorData = await response.json();
+                const errorData = await response.json().catch(() => ({}));
                 console.error("Error during completion:", errorData?.error);
+                this.finishTurn(genId);
                 return;
             }
 
@@ -239,56 +255,126 @@ export class ChatManager {
 
             await updateSession(this.sessionId, this.messages);
 
-            // Push an empty assistant message as a placeholder for the stream
+            // Push placeholder for the stream
             this.messages = [...this.messages, { role: 'assistant', content: '' }];
             this.notifySubscribers('onMessagesChange');
-
 
             const reader = response.body?.getReader();
             const decoder = new TextDecoder();
             let aiMessage = '';
-            let currentText = '';
+            const SEARCH_DELIMITER = '<<<KYOMA_SEARCH_SPLIT>>>';
+            let searchAckDelivered = false;
+            let ackTaskId: string | null = null;
+            let dispatchedSentenceCount = 0;
             
-            if (!reader) return;
+            if (!reader) {
+                this.finishTurn(genId);
+                return;
+            }
 
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
-                
-                const chunk = decoder.decode(value);
-                aiMessage += chunk;
-                
-                this.messages = [...this.messages.slice(0, -1), { role: 'assistant', content: aiMessage }];
-                this.notifySubscribers('onMessagesChange');
 
-                currentText += chunk;
-                const { sentences, remaining } = cut5(currentText);
+                // Stop check on each chunk
+                if (getCurrentGenerationId() !== genId) {
+                    reader.cancel();
+                    console.log(`[ChatManager] Stream cancelled mid-flight for genId ${genId}`);
+                    this.finishTurn(genId);
+                    return;
+                }
                 
-                if (sentences.length > 0) {
-                    for (const sentence of sentences) {
-                        const trimmed = sentence.trim();
-                        if (trimmed.length > 0) {
-                            if (taskId === null) {
-                                taskId = pipelineManager.createTaskFromLLM(input, trimmed);
-                            } else {
-                                pipelineManager.addLLMResponse(taskId, trimmed);
-                            }
+                const chunk = decoder.decode(value, { stream: true });
+                aiMessage += chunk;
+
+                // Check if search acknowledgement arrived before final answer
+                if (!searchAckDelivered && aiMessage.includes(SEARCH_DELIMITER)) {
+                    searchAckDelivered = true;
+                    const parts = aiMessage.split(SEARCH_DELIMITER);
+                    const ackText = parts[0].trim();
+
+                    // Play acknowledgement speech immediately without saving it as permanent chat history
+                    const ackChunks = splitIntoSpokenSentences(ackText);
+                    for (const ch of ackChunks) {
+                        if (ackTaskId === null) {
+                            ackTaskId = pipelineManager.createTaskFromLLM(input, ch);
+                        } else {
+                            pipelineManager.addLLMResponse(ackTaskId, ch);
                         }
                     }
-                    currentText = remaining;
-                }
-            }
+                    if (ackTaskId !== null) {
+                        pipelineManager.markLLMFinished(ackTaskId);
+                    }
 
-            if (currentText.length > 0) {
-                if (taskId === null) {
-                    taskId = pipelineManager.createTaskFromLLM(input, currentText);
+                    // Reset assistant placeholder for upcoming actual answer content
+                    const answerContent = (parts[1] || '').trimStart();
+                    this.messages[this.messages.length - 1] = { role: 'assistant', content: answerContent };
+                    this.notifySubscribers('onMessagesChange');
+                } else if (searchAckDelivered) {
+                    const parts = aiMessage.split(SEARCH_DELIMITER);
+                    const answerContent = (parts[1] || '').trimStart();
+                    this.messages[this.messages.length - 1] = { role: 'assistant', content: answerContent };
+                    this.notifySubscribers('onMessagesChange');
+
+                    // Stream-level TTS dispatch as sentences become ready
+                    const candidateSentences = splitIntoSpokenSentences(answerContent);
+                    if (candidateSentences.length > dispatchedSentenceCount + 1) {
+                        // All sentences except the currently forming last sentence are complete
+                        for (let sIdx = dispatchedSentenceCount; sIdx < candidateSentences.length - 1; sIdx++) {
+                            const sent = candidateSentences[sIdx];
+                            if (taskId === null) {
+                                taskId = pipelineManager.createTaskFromLLM(input, sent);
+                            } else {
+                                pipelineManager.addLLMResponse(taskId, sent);
+                            }
+                            dispatchedSentenceCount++;
+                        }
+                    }
                 } else {
-                    pipelineManager.addLLMResponse(taskId, currentText);
+                    this.messages[this.messages.length - 1] = { role: 'assistant', content: aiMessage };
+                    this.notifySubscribers('onMessagesChange');
+
+                    // Stream-level TTS dispatch as sentences become ready
+                    const candidateSentences = splitIntoSpokenSentences(aiMessage);
+                    if (candidateSentences.length > dispatchedSentenceCount + 1) {
+                        for (let sIdx = dispatchedSentenceCount; sIdx < candidateSentences.length - 1; sIdx++) {
+                            const sent = candidateSentences[sIdx];
+                            if (taskId === null) {
+                                taskId = pipelineManager.createTaskFromLLM(input, sent);
+                            } else {
+                                pipelineManager.addLLMResponse(taskId, sent);
+                            }
+                            dispatchedSentenceCount++;
+                        }
+                    }
                 }
             }
 
-            if (taskId !== null) {
-                pipelineManager.markLLMFinished(taskId);
+            if (getCurrentGenerationId() !== genId) {
+                this.finishTurn(genId);
+                return;
+            }
+
+            // Speak final remaining sentences at stream end
+            let finalToSpeak = aiMessage;
+            if (searchAckDelivered) {
+                const parts = aiMessage.split(SEARCH_DELIMITER);
+                finalToSpeak = (parts[1] || '').trim();
+            }
+
+            if (finalToSpeak) {
+                const spokenChunks = splitIntoSpokenSentences(finalToSpeak);
+                for (let sIdx = dispatchedSentenceCount; sIdx < spokenChunks.length; sIdx++) {
+                    const chunk = spokenChunks[sIdx];
+                    if (taskId === null) {
+                        taskId = pipelineManager.createTaskFromLLM(input, chunk);
+                    } else {
+                        pipelineManager.addLLMResponse(taskId, chunk);
+                    }
+                }
+                if (taskId !== null) {
+                    pipelineManager.markLLMFinished(taskId);
+                }
             }
             
             await updateSession(this.sessionId, this.messages);
@@ -301,20 +387,17 @@ export class ChatManager {
                 console.error('Fetch error:', error);
             }
         } finally {
-            globalStateManager.updateState('isLLMThinking', false);
+            this.finishTurn(genId);
         }
     }
 
     public async continueMessage(index: number) {
-        // take history from beginning of history to index
         const history = this.messages.slice(0, index + 1);
-        // send history to backend
         const response = await apiFetch('/api/completion/complete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ history: history, systemPrompt: this.systemPrompt })
         });
-        // get streaming response similar to sendMessage
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
 
@@ -323,9 +406,7 @@ export class ChatManager {
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            
             const chunk = decoder.decode(value);
-            // add to the existing message
             this.messages[index].content += chunk;
             this.notifySubscribers('onMessagesChange');
         }
@@ -334,21 +415,15 @@ export class ChatManager {
     }
 
     public async regenerateMessage(index: number) {
-        // Only regenerate assistant messages
         if (this.messages[index].role !== 'assistant') return;
         
-        // take history from beginning up to (but not including) the message being regenerated
         const historyUpToMessage = this.messages.slice(0, index);
-        
-        // Get the user message that prompted this assistant response
         const lastUserMessage = historyUpToMessage[historyUpToMessage.length - 1];
         if (!lastUserMessage || lastUserMessage.role !== 'user') return;
 
-        // Clear the current assistant message content
         this.messages[index].content = '';
         this.notifySubscribers('onMessagesChange');
 
-        // Use the same context logic as sendMessage for consistency
         let contextText = '';
         if (this.enableMemoryRetrieval) {
             try {
@@ -371,23 +446,18 @@ export class ChatManager {
             }
         }
 
-        // Assemble system prompt with context (same logic as sendMessage)
-        const visionSection = this.visionPrompt.trim() ? 
-            `[SCREEN CONTEXT]\n${this.visionPrompt}\n\n` : '';
-        const ocrSection = this.ocrPrompt.trim() ? 
-            `[SCREEN TEXT]\n${this.ocrPrompt}\n\n` : '';
-        const contextSection = contextText.trim() ? 
-            `[RETRIEVED MEMORY]\n${contextText}\n\n` : '';
+        const visionSection = this.visionPrompt.trim() ? `[SCREEN CONTEXT]\n${this.visionPrompt}\n\n` : '';
+        const ocrSection = this.ocrPrompt.trim() ? `[SCREEN TEXT]\n${this.ocrPrompt}\n\n` : '';
+        const contextSection = contextText.trim() ? `[RETRIEVED MEMORY]\n${contextText}\n\n` : '';
         const instructionsSection = `[INSTRUCTIONS]\n${this.systemPrompt}\n\n`;
         const systemPromptWithContext = visionSection + ocrSection + contextSection + instructionsSection;
 
-        // Send completion request with history up to the user message
         const response = await apiFetch('/api/completion', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 text: lastUserMessage.content,
-                history: historyUpToMessage.slice(0, -1), // exclude the user message since it's passed as 'text'
+                history: historyUpToMessage.slice(0, -1),
                 systemPrompt: systemPromptWithContext
             })
         });
@@ -397,7 +467,6 @@ export class ChatManager {
             return;
         }
 
-        // Stream the new response
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
         if (!reader) return;
@@ -405,7 +474,6 @@ export class ChatManager {
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            
             const chunk = decoder.decode(value);
             this.messages[index].content += chunk;
             this.notifySubscribers('onMessagesChange');
@@ -430,13 +498,14 @@ export class ChatManager {
 
     public async setSessionId(id: string | null) {
         this.sessionId = id;
-        // update session chat history
         if (id) {
             const session = await fetchSessionContent(id);
-            this.messages = session.history;
+            this.messages = session ? (session.history || []) : [];
+        } else {
+            this.messages = [];
         }
         this.notifySubscribers('onMessagesChange');
     }
 }
 
-export const chatManager = new ChatManager(); 
+export const chatManager = new ChatManager();

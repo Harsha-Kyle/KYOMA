@@ -1,9 +1,17 @@
 # hi
+import sys
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 # reminder_utils_copy.py
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="win10toast_click")
 
 import threading
+import queue
 import sqlite3
 import ctypes
 import datetime
@@ -28,11 +36,227 @@ script_dir = Path(__file__).resolve().parent
 reminder_folder = script_dir / "Reminders logs"
 reminder_folder.mkdir(parents=True, exist_ok=True)
 
-# Correct file paths
-DB_PATH = reminder_folder / "reminders.db"
+# Correct file paths (with Demo mode isolation support)
+def get_db_path():
+    try:
+        from demo_safety import is_demo_mode_active
+        if is_demo_mode_active():
+            demo_db = reminder_folder / "reminders_demo.db"
+            if not os.path.exists(demo_db):
+                init_db(demo_db)
+            return demo_db
+    except Exception:
+        pass
+    return reminder_folder / "reminders.db"
+
+class _DynamicDBPath:
+    def __fspath__(self):
+        return str(get_db_path())
+    def __str__(self):
+        return str(get_db_path())
+
+DB_PATH = _DynamicDBPath()
 LOG_PATH = reminder_folder / "reminder.log"
 
 toaster = ToastNotifier()
+
+_voice_input_instance = None
+_tts_instance = None
+
+def register_voice_services(voice_input=None, tts=None):
+    """Register in-process voice_input and tts instances for safe coordination."""
+    global _voice_input_instance, _tts_instance
+    if voice_input is not None:
+        _voice_input_instance = voice_input
+    if tts is not None:
+        _tts_instance = tts
+
+def _is_reminder_voice_enabled() -> bool:
+    """Check if 'reminder.speak_aloud' is enabled in settings.json or kyoma_config.json."""
+    try:
+        settings_file = Path(__file__).resolve().parent.parent / "backend" / "settings.json"
+        if settings_file.exists():
+            import json
+            with open(settings_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if "reminder.speak_aloud" in data:
+                    return bool(data["reminder.speak_aloud"])
+    except Exception:
+        pass
+    return True
+
+# In-process thread-safe reminder queue coordinator
+_reminder_speech_queue = queue.Queue()
+_reminder_worker_running = False
+_reminder_lock = threading.Lock()
+_reminder_audio_cache = {}  # reminder_id -> bytes
+
+def presynthesize_reminder_audio(reminder_id: int, text: str):
+    """Pre-synthesize reminder audio at scheduling time into in-memory cache."""
+    def _worker():
+        audio_bytes = None
+        if _tts_instance is not None:
+            try:
+                audio_bytes = _tts_instance.synthesize(text)
+                if isinstance(audio_bytes, dict):
+                    audio_bytes = None
+            except Exception:
+                pass
+        if not audio_bytes:
+            try:
+                import requests
+                resp = requests.post("http://localhost:8000/api/tts", json={"text": text}, timeout=10.0)
+                if resp.status_code == 200 and resp.content:
+                    audio_bytes = resp.content
+            except Exception:
+                pass
+        if audio_bytes and isinstance(audio_bytes, (bytes, bytearray)):
+            _reminder_audio_cache[reminder_id] = audio_bytes
+            log_event(f"⚡ [Reminder Pre-Cache] Pre-synthesized {len(audio_bytes)} bytes for reminder {reminder_id}: '{text}'")
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+def _reminder_playback_worker():
+    import time
+    import winsound
+    import requests
+    global _reminder_worker_running
+
+    log_event("🔊 [Reminder Stage 1/4] Playback worker started.")
+    while True:
+        try:
+            item = _reminder_speech_queue.get(timeout=2.0)
+        except queue.Empty:
+            with _reminder_lock:
+                _reminder_worker_running = False
+                log_event("🔊 [Reminder Worker] Queue empty, worker exiting.")
+                break
+
+        if isinstance(item, tuple):
+            text, r_id = item
+        else:
+            text, r_id = item, None
+
+        # Wait briefly only if system is actively in conversational TTS output (max 5s, don't stall)
+        wait_start = time.time()
+        while True:
+            is_busy = False
+            if _voice_input_instance is not None:
+                if getattr(_voice_input_instance, "system_state", "IDLE") == "SPEAKING":
+                    is_busy = True
+            if not is_busy or (time.time() - wait_start > 5.0):
+                break
+            time.sleep(0.1)
+
+        t_audio_start = time.time()
+        # 1. Mute microphone before reminder playback
+        log_event(f"🔊 [Reminder Stage 2/4] Muting microphone at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} for: '{text}'")
+        if _voice_input_instance is not None:
+            try:
+                _voice_input_instance.mute()
+            except Exception as _me:
+                log_event(f"⚠️ [Reminder Mic Mute Error] {_me}")
+        else:
+            try:
+                requests.post("http://localhost:8000/api/record/mute", timeout=0.5)
+            except Exception:
+                pass
+
+        # 2. Retrieve pre-cached audio or synthesize on demand
+        audio_bytes = _reminder_audio_cache.pop(r_id, None) if r_id else None
+        if audio_bytes:
+            log_event(f"⚡ [Reminder Stage 3/4] Using pre-cached audio ({len(audio_bytes)} bytes) for: '{text}'")
+        else:
+            log_event(f"🔊 [Reminder Stage 3/4] Synthesizing speech via Kokoro for: '{text}'")
+            if _tts_instance is not None:
+                try:
+                    audio_bytes = _tts_instance.synthesize(text)
+                    if isinstance(audio_bytes, dict):
+                        log_event(f"⚠️ [Reminder TTS Direct Error] Returned dict: {audio_bytes}")
+                        audio_bytes = None
+                except Exception as e:
+                    log_event(f"⚠️ [Reminder TTS Direct Error] {e}")
+
+            if not audio_bytes:
+                try:
+                    resp = requests.post(
+                        "http://localhost:8000/api/tts",
+                        json={"text": text},
+                        timeout=10.0
+                    )
+                    if resp.status_code == 200 and resp.content:
+                        audio_bytes = resp.content
+                except Exception as e:
+                    log_event(f"⚠️ [Reminder TTS HTTP Error] {e}")
+
+        # 3. Play audio
+        if audio_bytes and isinstance(audio_bytes, (bytes, bytearray)):
+            log_event(f"🔊 [Reminder Stage 4/4] Audio playback START at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} ({len(audio_bytes)} bytes)")
+            try:
+                winsound.PlaySound(audio_bytes, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+                log_event(f"✅ [Reminder Playback Complete] Audio playback END at {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+            except Exception as e:
+                log_event(f"⚠️ [Reminder PlaySound Error] {e}")
+        else:
+            log_event("⚠️ [Reminder Playback Error] No audio bytes available for playback!")
+
+        # Keep mic muted during playback and for exactly 500ms afterward to prevent speaker bleed
+        time.sleep(0.5)
+
+        # 4. Unmute microphone and restore appropriate standby state based on input mode
+        log_event(f"🎙️ [Reminder Mic Restoration] Unmuting mic at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} (+500ms guard)")
+        if _voice_input_instance is not None:
+            try:
+                _voice_input_instance.unmute()
+                if getattr(_voice_input_instance, "input_mode", "wake_word") == "always_listening":
+                    _voice_input_instance.system_state = "LISTENING"
+                else:
+                    _voice_input_instance.system_state = "IDLE"
+            except Exception as _ume:
+                log_event(f"⚠️ [Reminder Mic Unmute Error] {_ume}")
+        else:
+            try:
+                requests.post("http://localhost:8000/api/record/unmute", timeout=0.5)
+            except Exception:
+                pass
+
+        _reminder_speech_queue.task_done()
+
+def stop_reminder_speech():
+    """
+    Immediately stops active reminder speech playback and flushes the queue.
+    Crucial: Does NOT cancel, clear, or delete any scheduled reminders in the DB or scheduler.
+    """
+    global _reminder_speech_queue
+    try:
+        import winsound
+        winsound.PlaySound(None, 0)
+    except Exception:
+        pass
+    # Drain any remaining speech queue
+    while not _reminder_speech_queue.empty():
+        try:
+            _reminder_speech_queue.get_nowait()
+            _reminder_speech_queue.task_done()
+        except Exception:
+            break
+    log_event("🛑 [Reminder Audio Stop] Active reminder speech silenced (scheduled jobs preserved).")
+
+def _speak_reminder(text: str, reminder_id: int = None):
+    """
+    Queue reminder speech for playback. Checks 'reminder.speak_aloud' setting,
+    mutes the microphone, plays audio, and guards for 500ms before unmuting.
+    """
+    if not _is_reminder_voice_enabled():
+        log_event(f"ℹ️ [Reminder Voice Skipped] 'reminder.speak_aloud' is disabled: '{text}'")
+        return
+
+    global _reminder_worker_running
+    _reminder_speech_queue.put((text, reminder_id))
+    with _reminder_lock:
+        if not _reminder_worker_running:
+            _reminder_worker_running = True
+            threading.Thread(target=_reminder_playback_worker, daemon=True).start()
 
 # ----------------------
 # LOGGING
@@ -48,9 +272,10 @@ def log_event(event):
 # ----------------------
 # DATABASE SETUP
 # ----------------------
-def init_db():
-    if not os.path.exists(DB_PATH):
-        conn = sqlite3.connect(DB_PATH)
+def init_db(target_path=None):
+    db_file = target_path or get_db_path()
+    if not os.path.exists(db_file):
+        conn = sqlite3.connect(db_file)
         c = conn.cursor()
         c.execute("""
             CREATE TABLE reminders (
@@ -75,9 +300,18 @@ def normalize_datetime(dt_str):
     if not dt_str:
         raise ValueError("Empty datetime string")
 
+    cleaned = dt_str.strip()
+    # Normalize common STT anomalies like 'and 1 minute', 'in 1 min'
+    cleaned = re.sub(r"^(?:and|after)\s+", "in ", cleaned, flags=re.IGNORECASE)
+
     # Try to parse with dateparser first (handles natural language)
-    parsed = dateparser.parse(dt_str, settings={'PREFER_DATES_FROM': 'future'})
+    parsed = dateparser.parse(cleaned, settings={'PREFER_DATES_FROM': 'future'})
     if parsed:
+        # If time is in the past for today, advance by 1 day
+        now = datetime.now()
+        if parsed <= now and (now - parsed).total_seconds() > 60:
+            # User specified a clock time that already passed today (e.g. 8 PM at 10 PM)
+            parsed += timedelta(days=1)
         return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
     # fallback to manual formats
@@ -90,23 +324,28 @@ def normalize_datetime(dt_str):
     ]
     for fmt in formats:
         try:
-            dt = datetime.strptime(dt_str, fmt)
+            dt = datetime.strptime(cleaned, fmt)
+            now = datetime.now()
+            if dt <= now and (now - dt).total_seconds() > 60:
+                dt += timedelta(days=1)
             return dt.strftime("%Y-%m-%d %H:%M:%S")
         except ValueError:
             continue
     raise ValueError(f"Unrecognized datetime format: {dt_str}")
 
 def parse_relative_time(time_str):
-    """Parse relative time strings like 'in 10 minutes', '2 hours', etc."""
+    """Parse relative time strings like 'in 10 minutes', 'and 1 minute', '2 hours', etc."""
     if not time_str:
         return None
-    parsed = dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future'})
+    cleaned = time_str.strip()
+    cleaned = re.sub(r"^(?:and|after)\s+", "in ", cleaned, flags=re.IGNORECASE)
+    parsed = dateparser.parse(cleaned, settings={'PREFER_DATES_FROM': 'future'})
     if parsed:
         return parsed
 
     # fallback regex if still not parsed
-    time_str = time_str.lower().strip()
-    match = re.match(r"(\d+)\s*(sec|secs|second|seconds|min|mins|minute|minutes|hour|hours|hr|hrs|day|days)", time_str)
+    cleaned_lower = cleaned.lower().strip()
+    match = re.match(r"(?:in\s+)?(\d+)\s*(sec|secs|second|seconds|min|mins|minute|minutes|hour|hours|hr|hrs|day|days)", cleaned_lower)
     if not match:
         return None
 
@@ -127,6 +366,12 @@ def parse_relative_time(time_str):
 # ----------------------
 # DATABASE FUNCTIONS
 # ----------------------
+def _format_reminder_response(title: str, remind_time_str: str, recurrence: str = None) -> str:
+    """Format a clean, natural confirmation for reminders, never exposing dicts or IDs."""
+    nat_time = _format_natural_time(remind_time_str)
+    rec_text = f" repeating {recurrence}" if recurrence and recurrence.lower() not in ("one time", "one-time", "none", "") else ""
+    return f"Reminder set for {title} {nat_time}{rec_text}."
+
 def add_reminder(title: str, message: str, remind_time: str, recurrence: str = None):
     """
     Add a new reminder to the database and schedule it.
@@ -146,6 +391,12 @@ def add_reminder(title: str, message: str, remind_time: str, recurrence: str = N
     """
     if recurrence is None:
         recurrence = "one time"
+    # Prevent context contamination: if message is empty, whitespace, or looks like conversation residue, default to title
+    clean_title = (title or "").strip()
+    clean_msg = (message or "").strip()
+    if not clean_msg or clean_msg == clean_title:
+        clean_msg = clean_title
+
     remind_dt = None
     try:
         remind_dt = datetime.strptime(normalize_datetime(remind_time), "%Y-%m-%d %H:%M:%S")
@@ -161,7 +412,7 @@ def add_reminder(title: str, message: str, remind_time: str, recurrence: str = N
     c = conn.cursor()
     c.execute(
         "INSERT INTO reminders (title, message, time, status, repeat_interval) VALUES (?, ?, ?, ?, ?)",
-        (title, message, normalized_time, "pending", recurrence)
+        (clean_title, clean_msg, normalized_time, "pending", recurrence)
     )
     conn.commit()
     reminder_id = c.lastrowid
@@ -169,15 +420,17 @@ def add_reminder(title: str, message: str, remind_time: str, recurrence: str = N
 
     reminder = {
         "id": reminder_id,
-        "title": title,
-        "message": message,
+        "title": clean_title,
+        "message": clean_msg,
         "time": normalized_time,
         "repeat_interval": recurrence if recurrence else None
     }
 
     schedule_reminder(reminder)
-    log_event(f"🗓️ [Scheduled              ] reminder : '{title}' at {normalized_time} (recurrence: {recurrence})")
-    return reminder
+    spoken_text = f"Reminder: {clean_title}. {clean_msg}" if clean_msg and clean_msg != clean_title else f"Reminder: {clean_title}."
+    presynthesize_reminder_audio(reminder_id, spoken_text)
+    log_event(f"🗓️ [Scheduled              ] reminder : '{clean_title}' at {normalized_time} (recurrence: {recurrence})")
+    return _format_reminder_response(clean_title, normalized_time, recurrence)
 
 def get_active_reminders():
     conn = sqlite3.connect(DB_PATH)
@@ -230,19 +483,40 @@ def get_reminder_by_id(reminder_id):
 # ----------------------
 def show_toast(title, message, callback=None):
     try:
-        toaster.show_toast(
+        from winotify import Notification, audio
+        toast = Notification(
+            app_id="KYOMA AI Assistant",
             title=title,
             msg=message,
-            icon_path=None,
-            duration=10,
-            threaded=True,
-            callback_on_click=callback
+            duration="short"
         )
+        toast.set_audio(audio.Default, loop=False)
+        toast.show()
     except Exception as e:
-        log_event(f"⚠️ [Toast Error            ] failed to show toast: {e}")
-        print(f"⚠️ Toast notification error: {e}")
+        try:
+            toaster.show_toast(
+                title=title,
+                msg=message,
+                icon_path=None,
+                duration=5,
+                threaded=True
+            )
+        except Exception:
+            pass
+        log_event(f"⚠️ [Toast Error            ] toast notice: {e}")
+        print(f"⚠️ Toast notification: {e}")
 
 def trigger_reminder(title, message, reminder_id, repeat_interval=None):
+    # Atomic transition: only ONE worker can claim and fire a pending reminder
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE reminders SET status='fired' WHERE id=? AND status='pending'", (reminder_id,))
+    if c.rowcount == 0:
+        conn.close()
+        return  # Already claimed or cancelled
+    conn.commit()
+    conn.close()
+
     clicked = {"done": False}
 
     def on_click():
@@ -254,22 +528,42 @@ def trigger_reminder(title, message, reminder_id, repeat_interval=None):
             mark_reminder_completed(reminder_id)
         return 0
 
-    log_event(f"🔔 [Triggered              ] reminder : '{title}' - {message} at {datetime.now().strftime('%H:%M:%S')}")
+    log_event(f"🔔 [Triggered              ] reminder : '{title}' - {message} at {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
     print(f"🔔 Reminder firing: '{title}' — {message}")
 
-    # Show the reminder toast
+    # Deliver reminder via spoken TTS audio with mic-mute protection
+    spoken_text = f"Reminder: {title}. {message}" if message and message != title else f"Reminder: {title}."
+    _speak_reminder(spoken_text, reminder_id=reminder_id)
+
+    # Show the reminder toast via winotify (native Windows action center) with win10toast fallback
+    toast_shown = False
     try:
-        toaster.show_toast(
-            f"Reminder: {title}",
-            message or "Reminder!",
-            icon_path=None,
-            duration=10,
-            threaded=True,
-            callback_on_click=on_click
+        from winotify import Notification, audio
+        toast = Notification(
+            app_id="Kyoma.Assistant",
+            title=f"Reminder: {title}",
+            msg=message or "Reminder!",
+            duration="short"
         )
-    except Exception as e:
-        log_event(f"⚠️ [Toast Error            ] trigger_reminder failed for '{title}': {e}")
-        print(f"⚠️ Toast error for reminder '{title}': {e}")
+        toast.set_audio(audio.Default, loop=False)
+        toast.show()
+        toast_shown = True
+        log_event(f"🍞 [Toast Shown            ] winotify toast shown at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} for: '{title}'")
+    except Exception as notif_err:
+        log_event(f"⚠️ [Winotify Error         ] {notif_err}")
+
+    if not toast_shown:
+        try:
+            toaster.show_toast(
+                f"Reminder: {title}",
+                message or "Reminder!",
+                icon_path=None,
+                duration=5,
+                threaded=True
+            )
+            log_event(f"🍞 [Toast Shown            ] fallback toast shown at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} for: '{title}'")
+        except Exception as e:
+            log_event(f"⚠️ [Toast Fallback Error   ] {e}")
 
     # Retry/snooze logic if not clicked within 60 seconds
     def retry_check():
@@ -297,6 +591,7 @@ def trigger_missed_reminder(title, message, reminder_id):
             mark_reminder_completed(reminder_id)
         return 0
 
+    _speak_reminder(f"You missed a reminder: {title}.")
     show_toast(f"Missed Reminder: {title}", f"{message}\n⏰ You missed it!", callback=on_click)
     log_event(f"⚠️ [Missed                 ] reminder : '{title}' - retry scheduled in 5 minutes")
 
@@ -451,6 +746,12 @@ def cancel_reminder_by_title(title):
 # ----------------------
 # SCHEDULER
 # ----------------------
+# MISSED REMINDER POLICY:
+# When KYOMA starts, load_and_schedule_all() finds pending reminders whose time has passed.
+# These are fired as staggered "missed" notifications (15s apart) with a special toast.
+# If the user does not acknowledge within 60s, they are snoozed for 5 minutes.
+# One-time reminders are marked completed after acknowledgment.
+# Recurring reminders schedule their next occurrence.
 scheduler = BackgroundScheduler(daemon=True)
 
 def schedule_reminder(reminder, stagger_index=None):
@@ -474,6 +775,14 @@ def schedule_reminder(reminder, stagger_index=None):
 
     now = datetime.now()
     if remind_time <= now:
+        # If the reminder is older than 15 minutes, mark it missed/expired silently without firing audible alarm bursts
+        overdue_seconds = (now - remind_time).total_seconds()
+        if overdue_seconds > 900:  # > 15 minutes
+            mark_reminder_completed(reminder_id)
+            log_event(f"ℹ️ [Stale Reminder Auto-Cleared] '{title}' was {overdue_seconds/60:.1f} mins overdue — marked completed.")
+            print(f"ℹ️ Auto-cleared stale reminder '{title}' ({overdue_seconds/60:.1f} mins overdue)")
+            return
+
         if stagger_index is not None:
             delay_seconds = 15
             run_date = now + timedelta(seconds=delay_seconds * stagger_index)
@@ -501,9 +810,13 @@ def load_and_schedule_all():
         else:
             schedule_reminder(r)
 
+_scheduler_initialized = False
+
 def start_scheduler():
-    if getattr(scheduler, "running", False):
+    global _scheduler_initialized
+    if _scheduler_initialized or getattr(scheduler, "running", False):
         return
+    _scheduler_initialized = True
     scheduler.start()
     print("✅ Reminder scheduler started")
     load_and_schedule_all()
@@ -513,30 +826,93 @@ start_scheduler()
 # ----------------------
 # HELPER
 # ----------------------
+def _format_natural_time(time_str: str) -> str:
+    """Convert an ISO/standard datetime string into natural speech like 'today at 2:30 PM'."""
+    try:
+        dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return time_str
+
+    now = datetime.now()
+    time_part = dt.strftime("%I:%M %p").lstrip("0")
+    if dt.date() == now.date():
+        return f"today at {time_part}"
+    elif dt.date() == (now + timedelta(days=1)).date():
+        return f"tomorrow at {time_part}"
+    else:
+        return f"on {dt.strftime('%B')} {dt.day} at {time_part}"
+
+
+def reset_demo_reminders() -> str:
+    """Reset the demo reminders database. Only allowed in demo mode and never touches production DB."""
+    try:
+        from demo_safety import is_demo_mode_active
+        if not is_demo_mode_active():
+            return "Demo reset is only available when demo mode is active."
+    except Exception:
+        return "Demo mode check failed."
+
+    demo_db = reminder_folder / "reminders_demo.db"
+    if os.path.exists(demo_db):
+        try:
+            conn = sqlite3.connect(demo_db)
+            c = conn.cursor()
+            c.execute("DELETE FROM reminders")
+            conn.commit()
+            conn.close()
+            log_event("🧹 [Demo Reset] Cleared all reminders from reminders_demo.db")
+            return "Demo reminders database has been reset."
+        except Exception as e:
+            return f"Error resetting demo database: {e}"
+    return "Demo database does not exist yet."
+
+
 def list_active_reminders():
-    conn = sqlite3.connect(DB_PATH)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(get_db_path())
     cursor = conn.cursor()
 
     cursor.execute("""
         SELECT id, title, message, time, repeat_interval, status
         FROM reminders
-        WHERE status = 'pending'
+        WHERE status = 'pending' AND datetime(time) > datetime(?)
         ORDER BY datetime(time) ASC
-    """)
+    """, (now_str,))
 
     rows = cursor.fetchall()
     conn.close()
 
     if not rows:
-        return "No active reminders found."
+        return "You have no upcoming reminders scheduled."
 
-    lines = []
+    total_count = len(rows)
+
+    # Deduplicate identical titles while preserving order
+    seen_titles = {}
+    ordered_unique = []
     for row in rows:
-        rid, title, msg, time_str, repeat_interval, status = row
-        recurrence_text = f"(repeat: {repeat_interval})" if repeat_interval else "(one-time)"
-        lines.append(f"{title} — scheduled at {time_str} {recurrence_text}")
+        title = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf🎉🎂🔔]+', '', row[1]).strip()
+        time_nat = _format_natural_time(row[3])
+        if title not in seen_titles:
+            seen_titles[title] = 1
+            ordered_unique.append((title, time_nat))
+        else:
+            seen_titles[title] += 1
 
-    return "Active reminders:\n" + "\n".join(lines)
+    spoken_items = []
+    for title, time_nat in ordered_unique[:3]:
+        count = seen_titles[title]
+        dup_note = f" (and {count - 1} more)" if count > 1 else ""
+        spoken_items.append(f"{title}{dup_note} {time_nat}")
+
+    if len(spoken_items) == 1:
+        details = spoken_items[0]
+    elif len(spoken_items) == 2:
+        details = f"{spoken_items[0]}, and {spoken_items[1]}"
+    else:
+        details = ", ".join(spoken_items[:-1]) + f", and {spoken_items[-1]}"
+
+    return f"You have {total_count} upcoming reminder{'s' if total_count != 1 else ''}: {details}."
 
 
 

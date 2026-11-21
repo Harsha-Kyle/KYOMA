@@ -1,12 +1,12 @@
 import { HistoryItem } from "./types";
 import { apiFetch } from "./api-client";
 
-export async function createNewSession(title: string = 'New Chat'): Promise<string | null> {
+export async function createNewSession(title?: string): Promise<string | null> {
     try {
         const response = await apiFetch('/api/chat/session/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title }),
+            body: JSON.stringify(title ? { title } : {}),
         });
 
         
@@ -55,8 +55,8 @@ export async function updateSessionTitle(sessionId: string, title: string): Prom
     }
 }
 
-export const fetchSessions = async () => {
-    if (window.__kyoma_sessions_cache && window.__kyoma_sessions_cache.length > 0) {
+export const fetchSessions = async (forceRefresh: boolean = false) => {
+    if (!forceRefresh && window.__kyoma_sessions_cache && window.__kyoma_sessions_cache.length > 0) {
         return window.__kyoma_sessions_cache;
     }
     try {
@@ -95,6 +95,12 @@ export const deleteSession = async (sessionId: string) => {
         
         if (!response.ok) {
             throw new Error('Failed to delete session');
+        }
+        // Invalidate and update the memory cache immediately
+        if (window.__kyoma_sessions_cache) {
+            window.__kyoma_sessions_cache = window.__kyoma_sessions_cache.filter(
+                (s: any) => s.id !== sessionId
+            );
         }
     } catch (err) {
         console.error('Failed to delete session:', err);

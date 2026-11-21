@@ -1,5 +1,6 @@
 import logging
 import sys
+import re
 from colorama import Fore, Style
 
 # Define colors for different log levels
@@ -15,7 +16,10 @@ class CustomFormatter(logging.Formatter):
     def format(self, record):
         log_color = COLORS.get(record.levelno, Fore.WHITE)
         levelname = f"{log_color}{record.levelname}{Style.RESET_ALL}"  # Color only log level
-        return f"{levelname}:     {record.getMessage()}"
+        msg = record.getMessage()
+        # Redact any api_key query parameters from log messages
+        msg = re.sub(r"([?&]api_key=)[^&\s]+", r"\1[REDACTED]", msg)
+        return f"{levelname}:     {msg}"
 
 logger = logging.getLogger("LAV_logger")
 logger.setLevel(logging.DEBUG) 

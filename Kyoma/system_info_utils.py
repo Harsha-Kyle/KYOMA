@@ -73,7 +73,9 @@ def get_disk_usage():
     return f"Disk Usage: {usage.percent}% ({usage.used // (1024**3)}GB used / {usage.total // (1024**3)}GB total)"
 
 def get_time():
-    return {"ok": True, "out": datetime.datetime.now().strftime("The current time is %I:%M:%S %p")}
+    now = datetime.datetime.now()
+    formatted = now.strftime("%I:%M %p").lstrip("0")
+    return {"ok": True, "out": f"The current time is {formatted}"}
 
 def get_date():
     return {"ok": True, "out": datetime.date.today().strftime("Today's date is %B %d, %Y")}

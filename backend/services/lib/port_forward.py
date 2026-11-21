@@ -41,6 +41,14 @@ async def forward_request(request: Request, from_path: str, to_url: str) -> Resp
                 media_type=response.headers.get("content-type")
             )
         except Exception as e:
+            # If the forwarded target is an optional service (such as RVC) and is offline/disabled,
+            # return a benign response instead of spamming 502 fatal error logs.
+            if "/rvc" in from_path.lower():
+                logger.debug(f"Optional proxy service at {from_path} is offline/unreachable: {e}")
+                return JSONResponse(
+                    status_code=200,
+                    content={"models": [], "status": "disabled", "message": "Service offline"}
+                )
             logger.error(f"Error forwarding request: {e}")
             return JSONResponse(
                 status_code=502,

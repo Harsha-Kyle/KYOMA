@@ -35,7 +35,7 @@ const BOOT_LOG_LINES = [
 ];
 
 export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
-  const [progress, setProgress] = useState(6);
+  const [progress, setProgress] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [backendConnected, setBackendConnected] = useState(false);
   const [isFinishing, setIsFinishing] = useState(false);
@@ -300,7 +300,7 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 2000);
 
-        const res = await fetch("/api/status", {
+        const res = await fetch("/api/startup/status", {
           signal: controller.signal,
           headers: { "Cache-Control": "no-cache" },
         });
@@ -317,13 +317,16 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
 
           if (data.ready) {
             clearInterval(pollInterval);
-            setProgress(90);
+            // Smoothly advance progress based on actual readiness without hard clamp or jumping
+            const backendPct = typeof data.percentage === 'number' ? data.percentage : 90;
+            currentPct = Math.max(currentPct, Math.min(94, backendPct));
+            setProgress(currentPct);
             setSystemStateText("PRE-CACHING SYSTEM CONFIG & NEURAL ASSETS...");
             addLog(">>> Backend converged. Performing full state pre-cache...");
 
             // Pre-load all primary assets simultaneously
             try {
-              const [settingsRes, sessionsRes, modelsRes, voicesRes, kokoroRes, live2dRes, vrmRes] =
+              const [settingsRes, sessionsRes, modelsRes, _voicesRes, _kokoroRes, _live2dRes, _vrmRes] =
                 await Promise.allSettled([
                   apiFetch("/api/settings"),
                   apiFetch("/api/chat/sessions"),
@@ -334,7 +337,7 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
                   apiFetch("/api/character/vrm/models"),
                 ]);
 
-              if (settingsRes.status === "fulfilled" && settingsRes.value) {
+              if (settingsRes.status === "fulfilled" && settingsRes.value && settingsRes.value.ok) {
                 try {
                   const sData = await settingsRes.value.json();
                   if (sData?.settings) {
@@ -346,7 +349,7 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
                 } catch (_) {}
               }
 
-              if (sessionsRes.status === "fulfilled" && sessionsRes.value) {
+              if (sessionsRes.status === "fulfilled" && sessionsRes.value && sessionsRes.value.ok) {
                 try {
                   const sessData = await sessionsRes.value.json();
                   if (Array.isArray(sessData)) {
@@ -355,7 +358,7 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
                 } catch (_) {}
               }
 
-              if (modelsRes.status === "fulfilled" && modelsRes.value) {
+              if (modelsRes.status === "fulfilled" && modelsRes.value && modelsRes.value.ok) {
                 try {
                   const mData = await modelsRes.value.json();
                   if (mData?.models) {
@@ -388,32 +391,52 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
             }, 600);
             return;
           } else {
-            // Backend is up but not ready yet (e.g. running startup steps)
-            const targetPct = Math.max(55, Math.min(88, data.percentage || 72));
-            currentPct = Math.max(currentPct, targetPct);
+            // Backend is up and reporting real stage progress from /api/startup/status
+            const backendPct = typeof data.percentage === 'number' ? data.percentage : 25;
+            // Never jump backwards; monotonically track real backend progress
+            currentPct = Math.max(currentPct, Math.min(92, backendPct));
             setProgress(currentPct);
             setSystemStateText(data.message?.toUpperCase() || "STARTING REASONING DAEMON...");
             if (data.message) addLog(`>>> ${data.message}`);
 
-            setSubsystems((prev) => [
-              { ...prev[0], status: "ONLINE", metric: "PORT 8000 // ONLINE" },
+            const sMap = data.subsystems || {};
+            setSubsystems([
               {
-                ...prev[1],
-                status: data.step >= 2 ? "ONLINE" : "INITIALIZING",
-                metric: data.step >= 2 ? "NEURAL POOL ACTIVE" : "STARTING OLLAMA...",
+                tag: "CORE-01",
+                name: "FASTAPI KERNEL",
+                metric: sMap.imports?.status === "ready" ? `MODULES (${sMap.imports.elapsed_s || 0}s)` : "PORT 8000 // READY",
+                status: sMap.imports?.status === "ready" ? "ONLINE" : "INITIALIZING",
               },
               {
-                ...prev[2],
-                status: data.step >= 3 ? "ONLINE" : "INITIALIZING",
-                metric: data.step >= 3 ? "QDRANT ACTIVE" : "EMBEDDING VECTOR...",
+                tag: "NEUR-02",
+                name: "COGNITIVE SYNAPSE",
+                metric: sMap.model?.status === "ready" ? "GEMMA 4:E2B READY" : (sMap.ollama?.status === "ready" ? "OLLAMA CONNECTED" : "STARTING OLLAMA..."),
+                status: sMap.model?.status === "ready" || sMap.ollama?.status === "ready" ? "ONLINE" : "INITIALIZING",
               },
               {
-                ...prev[3],
-                status: data.step >= 4 ? "ONLINE" : "INITIALIZING",
-                metric: data.step >= 4 ? "KOKORO 54V ONLINE" : "ONNX WARMUP...",
+                tag: "VECT-03",
+                name: "VECTOR MEMORY",
+                metric: sMap.ai_services?.status === "ready" ? "MEMORY PIPELINE OK" : "INITIALIZING PIPELINE...",
+                status: sMap.ai_services?.status === "ready" ? "ONLINE" : "INITIALIZING",
               },
-              { ...prev[4], status: data.step >= 2 ? "ONLINE" : "STANDBY", metric: "16KHZ AUDIO PIPE" },
-              { ...prev[5], status: "ONLINE", metric: `RATIO ${TARGET_WORLDLINE}` },
+              {
+                tag: "ACOU-04",
+                name: "ACOUSTIC ENGINE",
+                metric: sMap.tts?.status === "ready" ? "KOKORO 54V ONNX READY" : "INITIALIZING TTS...",
+                status: sMap.tts?.status === "ready" ? "ONLINE" : "INITIALIZING",
+              },
+              {
+                tag: "RECP-05",
+                name: "AUDITORY RECEPTOR",
+                metric: sMap.stt?.status === "ready" ? "FASTER-WHISPER READY" : (sMap.stt?.detail || "WHISPER 16KHZ STREAM"),
+                status: sMap.stt?.status === "ready" ? "ONLINE" : (sMap.stt?.status === "degraded" ? "ONLINE" : "INITIALIZING"),
+              },
+              {
+                tag: "DIVR-06",
+                name: "DIVERGENCE METER",
+                metric: `RATIO ${TARGET_WORLDLINE}`,
+                status: "ONLINE",
+              },
             ]);
           }
         }
@@ -422,21 +445,22 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
         if (isCancelled) return;
         setBackendConnected(false);
 
-        // Smooth predictable advance from 6% to 86% based on time elapsed
+        // Smooth predictable advance from 0% to 50% based on measured stage durations:
+        // Python imports dominate cold boot at ~60s. Server only responds after imports finish.
         setElapsedSeconds((sec) => {
-          let calculatedPct = 6;
-          if (sec < 10) {
-            calculatedPct = 6 + (sec / 10) * 18; // 6% -> 24%
-            setSystemStateText("BOOT: LOADING PYTHON RUNTIME & PYTORCH MODULES...");
-          } else if (sec < 25) {
-            calculatedPct = 24 + ((sec - 10) / 15) * 28; // 24% -> 52%
-            setSystemStateText("INITIALIZING OLLAMA ENGINE & SCANNING HARDWARE...");
-          } else if (sec < 40) {
-            calculatedPct = 52 + ((sec - 25) / 15) * 24; // 52% -> 76%
-            setSystemStateText("STARTING FASTAPI CORE & VOICE SYNTHESIS...");
+          let calculatedPct = 0;
+          if (sec < 30) {
+            calculatedPct = (sec / 30) * 25; // 0% -> 25%
+            setSystemStateText("BOOT: LOADING PYTHON RUNTIME & AI MODULES (~60s)...");
+          } else if (sec < 60) {
+            calculatedPct = 25 + ((sec - 30) / 30) * 15; // 25% -> 40%
+            setSystemStateText("IMPORTING AI SERVICES & PYTORCH MODULES...");
+          } else if (sec < 90) {
+            calculatedPct = 40 + ((sec - 60) / 30) * 10; // 40% -> 50%
+            setSystemStateText("STARTING FASTAPI CORE & VOICE ENGINES...");
           } else {
-            calculatedPct = Math.min(88, 76 + ((sec - 40) / 15) * 12); // 76% -> 88%
-            setSystemStateText("FINALIZING VECTOR INDEXES & SOCKET DISPATCH...");
+            calculatedPct = Math.min(52, 50 + ((sec - 90) / 30) * 2); // 50% -> 52%
+            setSystemStateText("WAITING FOR BACKEND STARTUP TO COMPLETE...");
           }
           currentPct = Math.max(currentPct, Math.round(calculatedPct));
           setProgress(currentPct);

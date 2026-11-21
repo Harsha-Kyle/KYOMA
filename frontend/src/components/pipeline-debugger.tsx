@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/table"
 import { Panel } from "./panel";
 import { Label } from "@/components/ui/label"
-import { ScrollArea } from "@radix-ui/react-scroll-area";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Task } from "@/constants/types";
 import { Badge } from "@/components/ui/badge"
 import {

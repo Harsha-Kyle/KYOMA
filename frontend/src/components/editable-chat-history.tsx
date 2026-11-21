@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Edit3, Save, X, Trash, ArrowRight, RotateCcw } from "lucide-react"
 import { Button } from "./ui/button"
 import { Textarea } from "./ui/textarea"
@@ -8,7 +8,7 @@ import { Tooltip } from "./ui/tooltip"
 import { TooltipProvider } from "./ui/tooltip"
 import { toast } from "sonner"
 import { apiFetch } from "@/lib/api-client"
-
+import { globalStateManager } from "@/lib/globalStateManager"
 
 interface EditableChatHistoryProps {
     messages: HistoryItem[]
@@ -18,9 +18,50 @@ interface EditableChatHistoryProps {
     onRegenerate: (index: number) => void
 }
 
+/**
+ * Animated thinking bubble showing progress dots, subtle shimmer,
+ * and dynamic stage text ("Searching...", "Reading sources...", "Preparing answer...").
+ */
+function ThinkingBubble({ stage }: { stage: string }) {
+    return (
+        <div className="flex flex-col gap-1.5 self-start">
+            <div className="text-xs text-muted-foreground self-start">
+                AI
+            </div>
+            <div className="break-words max-w-7/10 w-fit px-4 py-2.5 rounded-lg text-sm font-medium shadow-xs bg-secondary text-secondary-foreground border border-border/50 animate-pulse transition-all">
+                <div className="flex items-center space-x-2.5">
+                    {/* 3 Bouncing Dots */}
+                    <div className="flex items-center space-x-1">
+                        <span className="w-2 h-2 rounded-full bg-primary/70 animate-bounce [animation-delay:-0.3s]" />
+                        <span className="w-2 h-2 rounded-full bg-primary/70 animate-bounce [animation-delay:-0.15s]" />
+                        <span className="w-2 h-2 rounded-full bg-primary/70 animate-bounce" />
+                    </div>
+                    {/* Stage description */}
+                    <span className="text-xs text-muted-foreground font-medium tracking-wide">
+                        {stage || "Thinking..."}
+                    </span>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 export default function EditableChatHistory({ messages, sessionId, onUpdate, onContinue, onRegenerate }: EditableChatHistoryProps) {
     const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null)
     const [editContent, setEditContent] = useState("")
+    const [isThinking, setIsThinking] = useState(false)
+    const [thinkingStage, setThinkingStage] = useState("Preparing answer...")
+
+    useEffect(() => {
+        const unsub = globalStateManager.subscribe('isLLMThinking', (thinking) => {
+            setIsThinking(thinking);
+            if (thinking) {
+                setThinkingStage("Preparing answer...");
+            }
+        });
+        setIsThinking(globalStateManager.getState('isLLMThinking'));
+        return () => unsub();
+    }, []);
 
     const startEditing = (index: number) => {
         setEditingMessageIndex(index)
@@ -99,9 +140,23 @@ export default function EditableChatHistory({ messages, sessionId, onUpdate, onC
         setEditContent("")
     }
 
+    // Filter out empty assistant placeholder from messages list so we render ThinkingBubble cleanly instead
+    const renderedMessages = messages.filter((m) => {
+        if (m.role === 'assistant' && (!m.content || m.content.trim() === '')) {
+            // Keep empty only if not thinking (e.g. streaming just about to start with first token)
+            return false;
+        }
+        return true;
+    });
+
+    const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+    const isLastAssistantEmpty = lastMessage?.role === 'assistant' && (!lastMessage.content || lastMessage.content.trim() === '');
+    // Once actual answer content exists, Preparing answer must disappear. No stale THINKING state after completion.
+    const showThinkingBubble = isThinking && (messages.length === 0 || lastMessage?.role === 'user' || isLastAssistantEmpty);
+
     return (
         <div className="flex flex-col space-y-4">
-            {messages.map((message, index) => (
+            {renderedMessages.map((message, index) => (
                 <div key={index} className="group relative flex flex-col gap-1.5">
                     <div className={`text-xs text-muted-foreground ${message.role === 'user'
                         ? 'self-end'
@@ -200,6 +255,10 @@ export default function EditableChatHistory({ messages, sessionId, onUpdate, onC
                     )}
                 </div>
             ))}
+            {/* Show polished animated thinking bubble without empty pill or layout jump */}
+            {showThinkingBubble && (
+                <ThinkingBubble stage={thinkingStage} />
+            )}
         </div>
     )
-} 
+}

@@ -100,7 +100,19 @@ def take_screenshot_save(name=None, show=False):
       file_path = date_folder / f"{stem}_{counter}{suffix}"
       counter += 1
 
-    screenshot = pyautogui.screenshot()
+    try:
+      screenshot = pyautogui.screenshot()
+    except Exception as grab_err:
+      # Fallback to mss which works reliably across all Windows desktop states
+      try:
+        import mss
+        with mss.mss() as sct:
+          mon = sct.monitors[0]
+          sct_img = sct.grab(mon)
+          screenshot = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+      except Exception as mss_err:
+        raise RuntimeError(f"Screen grab failed via pyautogui ({grab_err}) and mss ({mss_err})")
+
     screenshot.save(file_path)
 
     if not file_path.exists() or file_path.stat().st_size == 0:

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React from "react";
 import { Label } from "@/components/ui/label";
 import { useSettings } from "@/context/SettingsContext";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
@@ -15,21 +15,11 @@ interface SettingsDropdownProps {
 
 const SettingDropdown: React.FC<SettingsDropdownProps> = ({ id, defaultValue, label, description, className, options, onValueChange }) => {
     const { settings, updateSetting } = useSettings();
-    const isMountedRef = useRef(false);
 
     const currentValue = settings[id] !== undefined ? settings[id] : defaultValue;
 
-    useEffect(() => {
-        // Skip firing onValueChange on the initial mount — it causes double-apply
-        // of TTS provider / voice when settings load from cache (backend already correct).
-        // Only fire when the value changes AFTER mount (i.e. actual user action via
-        // updateSetting in the Select's onValueChange already calls it directly).
-        if (!isMountedRef.current) {
-            isMountedRef.current = true;
-            return;
-        }
-        onValueChange(currentValue);
-    }, [currentValue]);
+    // User selection in <Select onValueChange={...}> calls onValueChange directly.
+    // We avoid re-firing onValueChange on mount or background cache sync to prevent duplicate API requests.
 
     return (
         <div className={`flex items-start space-y-2 flex-col w-full ${className}`}>

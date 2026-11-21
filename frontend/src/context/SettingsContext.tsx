@@ -32,7 +32,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const [loading, setLoading] = useState(!window.__kyoma_settings_cache);
 
     useEffect(() => {
-        if (window.__kyoma_settings_cache) {
+        if (window.__kyoma_settings_cache && Object.keys(window.__kyoma_settings_cache).length > 0) {
             // Already have data from loading screen pre-fetch — skip re-fetch
             const cached = window.__kyoma_settings_cache;
             setSettings(cached);
@@ -65,6 +65,10 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, []);
 
     const updateSetting = async (key: string, value: any) => {
+        // No-op if value hasn't changed
+        if (settings[key] === value) {
+            return;
+        }
         try {
             setSettings((prev) => ({ ...prev, [key]: value }));
             const response = await apiFetch('/api/settings/update', {

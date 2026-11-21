@@ -4,34 +4,42 @@ import { Button } from "@/components/ui/button"
 import { Square } from "lucide-react"
 import { globalStateManager } from "@/lib/globalStateManager"
 import { pipelineManager } from "@/lib/pipelineManager"
-import { ttsManager } from "@/lib/ttsManager"
-import { chatManager } from "@/lib/chatManager"
-import { apiFetch } from "@/lib/api-client"
+import { stopAll } from "@/lib/stopController"
 
 function InputPage() {
-    const [isTTSPlaying, setIsTTSPlaying] = useState<boolean>(false);
+    const [turnActive, setTurnActive] = useState<boolean>(false);
 
     useEffect(() => {
-        const unsubscribe = globalStateManager.subscribe('isTTSPlaying', (playing) => {
-            setIsTTSPlaying(playing);
-        });
-        setIsTTSPlaying(globalStateManager.getState('isTTSPlaying'));
-        return () => unsubscribe();
+        const updateTurnState = () => {
+            const thinking = globalStateManager.getState('isLLMThinking');
+            const playing = globalStateManager.getState('isTTSPlaying');
+            const task = pipelineManager.getCurrentTask();
+            const hasActiveTask = !!task &&
+                task.status !== 'task_finished' &&
+                task.status !== 'cancelled';
+            setTurnActive(thinking || playing || hasActiveTask);
+        };
+
+        const unsubTTS = globalStateManager.subscribe('isTTSPlaying', updateTurnState);
+        const unsubLLM = globalStateManager.subscribe('isLLMThinking', updateTurnState);
+        const unsubPipeline = pipelineManager.subscribe(updateTurnState);
+
+        updateTurnState();
+        return () => {
+            unsubTTS();
+            unsubLLM();
+            unsubPipeline();
+        };
     }, []);
 
     const handleStop = () => {
-        ttsManager.stopAllAudio();
-        chatManager.stopGeneration();
-        pipelineManager.cancelAllTasks();
-        pipelineManager.interruptCurrentTask();
-        apiFetch('/api/record/unmute', { method: 'POST' }).catch(() => {});
-        globalStateManager.updateState('isTTSPlaying', false);
-        globalStateManager.updateState('isLLMThinking', false);
+        stopAll().catch(() => {});
+        setTurnActive(false);
     };
 
     return (
-        <div className="p-5">
-            {isTTSPlaying && (
+        <div className="h-full overflow-y-auto p-5">
+            {turnActive && (
                 <div className="flex justify-center mb-4">
                     <Button
                         variant="destructive"
@@ -48,5 +56,4 @@ function InputPage() {
     )
 }
 
-  
-  export default InputPage
+export default InputPage

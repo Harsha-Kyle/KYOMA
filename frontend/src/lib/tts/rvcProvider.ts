@@ -44,17 +44,31 @@ export class RVCProvider extends BaseTTSProvider {
     }
 
     private async fetchVoices() {
-        const response = await apiFetch('/api/rvc/models');
-        const data = await response.json();
-        this.voices = data.models.map((model: RVCModel) => model.name);
-        this.notifySubscribers();
+        try {
+            const response = await apiFetch('/api/rvc/models');
+            if (!response.ok) return;
+            const data = await response.json();
+            if (data?.models) {
+                this.voices = data.models.map((model: RVCModel) => model.name);
+                this.notifySubscribers();
+            }
+        } catch {
+            // RVC not running or disabled - gracefully ignore
+        }
     }
 
     private async fetchEdgeVoices() {
-        const response = await apiFetch('/api/rvc/edge-models');
-        const data = await response.json();
-        this.edgeVoices = data.models;
-        this.notifySubscribers();
+        try {
+            const response = await apiFetch('/api/rvc/edge-models');
+            if (!response.ok) return;
+            const data = await response.json();
+            if (data?.models) {
+                this.edgeVoices = data.models;
+                this.notifySubscribers();
+            }
+        } catch {
+            // RVC not running or disabled - gracefully ignore
+        }
     }
 
     getVoices(): string[] {

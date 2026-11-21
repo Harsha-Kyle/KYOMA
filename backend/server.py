@@ -1,12 +1,33 @@
 import sys
 import os
+import re
+import logging
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+
+# Redact sensitive api_key queries from uvicorn access logs
+class RedactAPIKeyFilter(logging.Filter):
+    def filter(self, record):
+        if hasattr(record, "args") and isinstance(record.args, tuple):
+            new_args = []
+            for arg in record.args:
+                if isinstance(arg, str):
+                    new_args.append(re.sub(r"([?&]api_key=)[^&\s]+", r"\1[REDACTED]", arg))
+                else:
+                    new_args.append(arg)
+            record.args = tuple(new_args)
+        if record.msg and isinstance(record.msg, str):
+            record.msg = re.sub(r"([?&]api_key=)[^&\s]+", r"\1[REDACTED]", record.msg)
+        return True
+
+for _l in ("uvicorn", "uvicorn.access", "uvicorn.error", "fastapi"):
+    logging.getLogger(_l).addFilter(RedactAPIKeyFilter())
 
 import time
 from services.lib.startup_progress import startup_progress
 # Track import time
 start_time = time.time()
 total_start_time = time.time()
+startup_progress.get_subsystem("imports").start("Loading modules...")
 startup_progress.show_step("Importing python modules")
 
 import asyncio
@@ -23,7 +44,7 @@ from services.lib.port_forward import create_proxy_middleware
 from services.lib.process_manager import process_manager
 import os
 import aiofiles
-import aiohttp
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, WebSocket, HTTPException, File, UploadFile, Form
 from fastapi.websockets import WebSocketDisconnect
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
@@ -35,8 +56,7 @@ from services.LLM.LLM import LLM
 from pydantic import BaseModel
 from datetime import datetime
 import json
-from typing import Any, Dict, List
-import mss
+from typing import Any, Dict, List, Optional
 try:
     from backend.auth import API_KEY
 except ImportError:
@@ -51,6 +71,7 @@ download_progress = {}
 
 # Show import completion immediately after imports
 import_time = time.time() - start_time
+startup_progress.get_subsystem("imports").complete(f"Loaded in {import_time:.2f}s")
 startup_progress.complete_step(f"Imports completed in {import_time:.2f}s")
 
 # Initialize RVC server
@@ -61,7 +82,17 @@ rvc_dir = os.path.join(os.path.dirname(__file__), "plugins", "rvc")
 rvc_runtime_python = os.path.join(rvc_dir, "runtime", "python.exe")
 rvc_server_script = os.path.join(rvc_dir, "rvc_server.py")
 
-if os.path.exists(rvc_runtime_python) and os.path.exists(rvc_server_script):
+# In demo mode, skip launching RVC standalone pack subprocess
+try:
+    kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
+    if kyoma_path not in sys.path:
+        sys.path.append(kyoma_path)
+    from demo_safety import is_demo_mode_active
+    rvc_demo_mode = is_demo_mode_active()
+except Exception:
+    rvc_demo_mode = False
+
+if not rvc_demo_mode and os.path.exists(rvc_runtime_python) and os.path.exists(rvc_server_script):
     try:
         success, message = process_manager.start_server_process(
             name="RVC",
@@ -77,11 +108,102 @@ if os.path.exists(rvc_runtime_python) and os.path.exists(rvc_server_script):
 else:
     logger.warning("RVC server skipped: runtime or script not found. Please install the RVC standalone pack if required.")
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager replacing deprecated @app.on_event startup/shutdown."""
+    try:
+        from services.LLM.KyomaLLM import set_search_broadcast_hook
+        loop = asyncio.get_event_loop()
+        set_search_broadcast_hook(loop, broadcast_state_all)
+        logger.info("[Search] KyomaLLM broadcast hook registered.")
+    except Exception as _e:
+        logger.warning(f"[Search] Could not register KyomaLLM broadcast hook: {_e}")
+
+    try:
+        voice_input.state_callback = broadcast_state_all
+        logger.info("[VoiceInput] state_callback connected to broadcast_state_all.")
+    except Exception as _e:
+        logger.warning(f"[VoiceInput] Could not connect state_callback: {_e}")
+
+    try:
+        kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
+        if kyoma_path not in sys.path:
+            sys.path.append(kyoma_path)
+        import reminder_utils
+        reminder_utils.register_voice_services(voice_input=voice_input, tts=tts)
+        logger.info("[Reminder] In-process voice services registered with reminder_utils.")
+    except Exception as _re:
+        logger.warning(f"[Reminder] Could not register in-process voice services: {_re}")
+
+    try:
+        await run_startup_health_check()
+    except Exception as _e:
+        logger.error(f"[HealthCheck] Error during startup health check: {_e}")
+
+    async def _async_warmup():
+        def _warm():
+            try:
+                import ollama
+                startup_progress.get_subsystem("model").start("Warming up Gemma model...")
+                logger.info("[Warmup] Warming up Ollama Gemma model in background...")
+                t_w0 = time.perf_counter()
+                ollama.chat(
+                    model="gemma4:e2b",
+                    messages=[{"role": "user", "content": "hi"}],
+                    keep_alive="1h",
+                    think=False,
+                    options={"temperature": 0.2, "num_predict": 1}
+                )
+                elapsed = time.perf_counter() - t_w0
+                startup_progress.get_subsystem("model").complete(f"Gemma warmed up in {elapsed:.2f}s")
+                logger.info(f"[Warmup] Gemma model warmed up in {elapsed:.2f}s")
+            except Exception as _we:
+                startup_progress.get_subsystem("model").degrade(f"Warmup failed (non-critical): {_we}")
+                logger.warning(f"[Warmup] Gemma model warmup failed (non-critical): {_we}")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _warm)
+
+    asyncio.create_task(_async_warmup())
+
+    async def _mic_recovery_watchdog():
+        _stuck_since = None
+        while True:
+            await asyncio.sleep(5)
+            try:
+                if not voice_input.is_muted:
+                    _stuck_since = None
+                    continue
+                if voice_input.system_state in ("THINKING", "SPEAKING"):
+                    _stuck_since = None
+                    continue
+                if _stuck_since is None:
+                    _stuck_since = time.time()
+                elif time.time() - _stuck_since > 45:
+                    logger.warning("[MicRecovery] Microphone stuck muted for >45s without active state. Recovering.")
+                    voice_input.unmute()
+                    if voice_input.input_mode == "always_listening":
+                        voice_input.system_state = "LISTENING"
+                    else:
+                        voice_input.system_state = "IDLE"
+                    await broadcast_state_all(voice_input.system_state)
+                    _stuck_since = None
+            except Exception as _wd_err:
+                logger.debug(f"[MicRecovery] Watchdog error: {_wd_err}")
+                _stuck_since = None
+
+    asyncio.create_task(_mic_recovery_watchdog())
+
+    yield
+
+    # Clean shutdown
+    process_manager.stop_all_servers()
+
+app = FastAPI(lifespan=lifespan)
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
     EXEMPT_PATHS = {
         "/health", "/docs", "/openapi.json", "/", "/black.png", "/api/status",
+        "/api/startup/status", "/api/health/startup",
         "/api/tts", "/api/tts/provider", "/api/tts/voices", "/api/tts/change-voice",
         "/api/tts/kokoro/voices", "/api/tts/kokoro/speed"
     }
@@ -108,6 +230,12 @@ app.add_middleware(APIKeyMiddleware)
 async def health():
     return {"status": "ok"}
 
+@app.get("/api/startup/status")
+async def get_startup_status():
+    """Startup progress and real subsystem readiness for loading-screen telemetry."""
+    status = startup_progress.get_status()
+    return JSONResponse(content=status)
+
 @app.get("/api/status")
 async def get_server_status():
     status = startup_progress.get_status()
@@ -129,6 +257,7 @@ app.mount("/resource", StaticFiles(directory="../frontend/dist/resource"), name=
 
 # Initialize Services
 start_time = time.time()
+startup_progress.get_subsystem("ai_services").start("Initializing voice, memory, TTS...")
 startup_progress.show_step("Loading AI Services")
 voice_input:VoiceInput = VoiceInput()
 llm:LLM = LLM()
@@ -137,6 +266,15 @@ history_store:HistoryStore = HistoryStore()
 tts:TTS = TTS()
 vision_input:VisionInput = VisionInput()
 character_manager:CharacterManager = CharacterManager()
+startup_progress.get_subsystem("ai_services").complete(f"Loaded in {time.time() - start_time:.2f}s")
+if voice_input.stt_available:
+    startup_progress.get_subsystem("stt").complete("Microphone & Faster-Whisper ready")
+else:
+    startup_progress.get_subsystem("stt").degrade("STT initialized with fallback")
+if tts.provider == "kokoro" and getattr(tts, "kokoro", None) is not None:
+    startup_progress.get_subsystem("tts").complete("Kokoro 54V ONNX loaded")
+else:
+    startup_progress.get_subsystem("tts").complete(f"Active provider: {tts.provider}")
 startup_progress.complete_step(f"AI Services loaded in {time.time() - start_time:.2f}s")
 
 clients = set()
@@ -157,6 +295,143 @@ async def broadcast_esp32_state(state: str):
             dead_clients.add(client)
     esp32_clients.difference_update(dead_clients)
 
+
+async def broadcast_state_all(state: str):
+    """
+    Broadcast a state update to both the ESP32 and all WebUI WebSocket clients.
+    Used during search to send 'thinking' without blocking the event loop.
+    """
+    await broadcast_esp32_state(state)
+    # Also notify WebUI audio clients with a JSON state message
+    dead_clients = set()
+    for client in list(clients):
+        try:
+            await client.send_json({"type": "state", "state": state})
+        except Exception:
+            dead_clients.add(client)
+    clients.difference_update(dead_clients)
+
+
+# Register the search broadcast hook so KyomaLLM can send state from threads.
+try:
+    from services.LLM.KyomaLLM import set_search_broadcast_hook
+    import asyncio as _asyncio
+    # Hook is registered at startup; loop reference is captured when first search fires.
+    def _kyoma_search_state_factory(state: str):
+        return broadcast_state_all(state)
+    # Defer actual loop capture to runtime since event loop isn't running at import time.
+    _kyoma_broadcast_registered = False
+    def _register_kyoma_hook():
+        global _kyoma_broadcast_registered
+        if not _kyoma_broadcast_registered:
+            try:
+                loop = _asyncio.get_event_loop()
+                set_search_broadcast_hook(loop, _kyoma_search_state_factory)
+                _kyoma_broadcast_registered = True
+            except Exception as _rh_err:
+                logger.warning(f"Could not register KyomaLLM search hook: {_rh_err}")
+except ImportError:
+    pass  # Not using KyomaLLM — no-op
+
+
+async def run_startup_health_check() -> dict:
+    """
+    Concise startup health check covering:
+    - Ollama reachable
+    - gemma4:e2b loaded/available
+    - Kokoro TTS ready
+    - Microphone open / functional
+    - ESP32 connected
+    - Demo mode enabled/disabled
+    Never claims a component is healthy unless actually checked.
+    """
+    import requests
+    import sounddevice as sd
+
+    logger.info("=" * 60)
+    logger.info("KYOMA SYSTEM STARTUP HEALTH CHECK")
+    logger.info("=" * 60)
+
+    report = {}
+
+    # 1. Ollama reachable
+    try:
+        r = requests.get("http://localhost:11434/api/tags", timeout=1.5)
+        ollama_reachable = (r.status_code == 200)
+        models = [m.get("name") for m in r.json().get("models", [])] if ollama_reachable else []
+    except Exception:
+        ollama_reachable = False
+        models = []
+    report["ollama_reachable"] = ollama_reachable
+    if ollama_reachable:
+        startup_progress.get_subsystem("ollama").complete("Ollama daemon connected")
+    else:
+        startup_progress.get_subsystem("ollama").fail("Ollama unreachable on :11434")
+    logger.info(f"  [1/6] Ollama Service: {'HEALTHY (online)' if ollama_reachable else 'FAIL (unreachable)'}")
+
+    # 2. gemma4:e2b loaded/available
+    gemma_available = any("gemma4:e2b" in m for m in models)
+    report["gemma4_e2b_available"] = gemma_available
+    if gemma_available:
+        startup_progress.get_subsystem("model").complete("gemma4:e2b verified")
+    else:
+        startup_progress.get_subsystem("model").degrade("gemma4:e2b not found, using fallback")
+    logger.info(f"  [2/6] gemma4:e2b Model: {'HEALTHY (available)' if gemma_available else 'FAIL (not found in ollama list)'}")
+
+    # 3. Kokoro TTS ready
+    tts_ready = False
+    try:
+        tts_ready = (tts.provider == "kokoro" and getattr(tts, "kokoro", None) is not None)
+        if not tts_ready and tts.provider == "kokoro":
+            # Engine available check
+            tts_ready = getattr(tts._engine, "available", False)
+    except Exception:
+        pass
+    report["kokoro_tts_ready"] = tts_ready
+    logger.info(f"  [3/6] Kokoro TTS: {'HEALTHY (ready)' if tts_ready else 'FAIL (unavailable)'}")
+
+    # 4. Microphone functional
+    mic_open = False
+    try:
+        devices = sd.query_devices()
+        input_devs = [d for d in devices if d.get('max_input_channels', 0) > 0]
+        mic_open = len(input_devs) > 0 and voice_input.stt_available
+    except Exception:
+        pass
+    report["microphone_ready"] = mic_open
+    logger.info(f"  [4/6] Microphone & STT: {'HEALTHY (detected & models loaded)' if mic_open else 'FAIL (no mic / STT init error)'}")
+
+    # 5. ESP32 connected
+    esp32_conn = len(esp32_clients) > 0
+    report["esp32_connected"] = esp32_conn
+    logger.info(f"  [5/6] ESP32 Companion: {'CONNECTED' if esp32_conn else 'STANDBY (no clients connected)'}")
+
+    # 6. Demo mode
+    demo_active = False
+    try:
+        kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
+        if kyoma_path not in sys.path:
+            sys.path.append(kyoma_path)
+        from demo_safety import is_demo_mode_active
+        demo_active = is_demo_mode_active()
+    except Exception as _dme:
+        logger.debug(f"[HealthCheck] Demo mode check: {_dme}")
+    report["demo_mode_active"] = demo_active
+    logger.info(f"  [6/6] Demo Mode Safety: {'ENABLED (strict presentation protections active)' if demo_active else 'DISABLED'}")
+    logger.info("=" * 60)
+
+    return report
+
+
+@app.get("/api/health/startup")
+async def get_startup_health():
+    """API endpoint to query startup health report."""
+    report = await run_startup_health_check()
+    all_ok = report["ollama_reachable"] and report["gemma4_e2b_available"] and report["kokoro_tts_ready"] and report["microphone_ready"]
+    return JSONResponse(status_code=200 if all_ok else 503, content={"status": "healthy" if all_ok else "degraded", "checks": report})
+
+
+
 # *******************************
 # WebUI
 # *******************************
@@ -172,6 +447,35 @@ async def serve_black_png():
 # *******************************
 # Input
 # *******************************
+
+
+@app.post("/api/audio/stop")
+async def stop_all_active_audio():
+    """
+    Immediate backend silence: stops active reminder playback (winsound),
+    unmutes microphone, and resets state.
+    Preserves all scheduled reminder records and future jobs.
+    """
+    try:
+        kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
+        if kyoma_path not in sys.path:
+            sys.path.append(kyoma_path)
+        import reminder_utils
+        reminder_utils.stop_reminder_speech()
+    except Exception as e:
+        logger.warning(f"Error in stop_reminder_speech: {e}")
+
+    try:
+        voice_input.unmute()
+        if voice_input.input_mode == "always_listening":
+            voice_input.system_state = "LISTENING"
+        else:
+            voice_input.system_state = "IDLE"
+        await broadcast_state_all(voice_input.system_state)
+    except Exception as e:
+        logger.warning(f"Error unmuting voice_input on audio stop: {e}")
+
+    return JSONResponse(content={"status": "ok", "message": "Playback silenced; scheduled reminders preserved."})
 
 @app.post("/api/record/start")
 async def start_recording():
@@ -197,6 +501,37 @@ async def unmute_recording():
     voice_input.unmute()
     return Response(status_code=200)
 
+@app.post("/api/record/push_to_talk")
+async def push_to_talk_trigger():
+    """
+    Bypasses wake-word detection directly for WebUI Push-To-Talk button.
+    Opens the listening window immediately without requiring 'Hey Kyoma'.
+    """
+    import time
+    voice_input._wake_active_until = time.time() + 10.0
+    voice_input.system_state = "LISTENING"
+    await broadcast_state_all("LISTENING")
+    return JSONResponse(content={"status": "ok", "mode": "push_to_talk_active", "window_s": 10.0})
+
+@app.post("/api/record/input_mode")
+async def set_input_mode(mode: str = Form(...)):
+    """Set input mode: always_listening | wake_word | push_to_talk"""
+    clean_mode = mode.lower().strip()
+    if clean_mode not in ("always_listening", "wake_word", "push_to_talk"):
+        return JSONResponse(status_code=400, content={"error": f"Invalid mode: {mode}"})
+    voice_input.input_mode = clean_mode
+    settings_manager.update_settings({"input_mode": clean_mode})
+    # Broadcast to all connected WebUI clients so status bar updates immediately
+    dead_clients = set()
+    for client in list(clients):
+        try:
+            await client.send_json({"type": "input_mode", "input_mode": clean_mode})
+        except Exception:
+            dead_clients.add(client)
+    clients.difference_update(dead_clients)
+    logger.info(f"[Server] VoiceInput input_mode switched to: {clean_mode}")
+    return JSONResponse(content={"status": "ok", "input_mode": clean_mode})
+
 
 @app.websocket("/ws/audio")
 async def websocket_audio(websocket: WebSocket):
@@ -205,14 +540,20 @@ async def websocket_audio(websocket: WebSocket):
     if not key or not secrets.compare_digest(key, API_KEY):
         await websocket.close(code=1008)
         return
+    # Add client to the set of connected WebUI clients
     clients.add(websocket)
+    # Send current active input mode immediately upon WebSocket connection
+    try:
+        await websocket.send_json({"type": "input_mode", "input_mode": voice_input.input_mode})
+    except Exception:
+        pass
     try:
         while True:
             await websocket.receive_text()
     except Exception:
         pass
     finally:
-        clients.remove(websocket)
+        clients.discard(websocket)
         try:
             await websocket.close()
         except RuntimeError:
@@ -363,11 +704,16 @@ async def get_monitor_info():
     Get information about available monitors.
     """
     try:
-        monitors = vision_input.get_monitors()
-        logger.info(f"Monitors Server: {monitors}")
+        raw_monitors = vision_input.get_monitors()
+        # In MSS on Windows/Linux, index 0 is always the virtual all-monitors bounding box.
+        # If there are physical monitors (len > 1), filter out virtual monitor 0 to prevent duplicates.
+        if len(raw_monitors) > 1:
+            actual_monitors = raw_monitors[1:]
+        else:
+            actual_monitors = raw_monitors
             
         monitor_info = []
-        for i, monitor in enumerate(monitors):
+        for i, monitor in enumerate(actual_monitors):
             # Determine if this is likely the primary monitor
             # Primary monitor usually has left=0 and top=0 or is the first actual monitor
             is_primary = (monitor["left"] == 0 and monitor["top"] == 0)
@@ -386,7 +732,7 @@ async def get_monitor_info():
             status_code=200,
             content={
                 "monitors": monitor_info,
-                "count": len(monitors)
+                "count": len(monitor_info)
             }
         )
     except Exception as e:
@@ -510,7 +856,7 @@ async def websocket_chat(websocket: WebSocket):
     except Exception:
         pass
     finally:
-        chat_clients.remove(websocket)
+        chat_clients.discard(websocket)
         try:
             await websocket.close()
         except RuntimeError:
@@ -591,9 +937,24 @@ async def complete_current_response(request: CompleteResponseRequest, fastapi_re
         logger.error(f"Error during completion: {e}", exc_info=True)
         return {"error": "Internal server error"}
 
-# Utility function to wrap a regular generator as an async generator
+# Utility function to wrap a regular generator as an async generator.
+# Uses run_in_executor so that synchronous generators (e.g. KyomaLLM search
+# pipeline) do NOT block the event loop — this lets chunked HTTP responses
+# flush immediately (critical for search acknowledgement latency).
 async def async_generator_wrapper(generator):
-    for item in generator:
+    loop = asyncio.get_event_loop()
+    _sentinel = object()
+
+    def _next_item(gen):
+        try:
+            return next(gen)
+        except StopIteration:
+            return _sentinel
+
+    while True:
+        item = await loop.run_in_executor(None, _next_item, generator)
+        if item is _sentinel:
+            break
         yield item
 
 @app.get("/api/llm/models")
@@ -677,6 +1038,7 @@ async def download_model(request: DownloadModelRequest):
 async def download_model_file(download_id: str, url: str, target_path: str):
     """Download a model file with progress tracking"""
     try:
+        import aiohttp
         download_progress[download_id]['status'] = 'downloading'
         
         async with aiohttp.ClientSession() as session:
@@ -965,7 +1327,14 @@ async def change_voice(request: ChangeVoiceRequest):
 @app.post("/api/tts")
 async def get_audio(request: TTSRequest):
     try:
-        response = tts.synthesize(request.text)
+        try:
+            from Kyoma.tts_sanitizer import sanitize_for_tts
+            cleaned_text = sanitize_for_tts(request.text)
+        except Exception:
+            cleaned_text = request.text
+        if not cleaned_text or not any(c.isalnum() for c in cleaned_text):
+            return Response(status_code=204)
+        response = tts.synthesize(cleaned_text)
         # synthesize() returns a dict when TTS is unavailable or errors
         if isinstance(response, dict):
             msg = response.get("message", "TTS synthesis failed")
@@ -1187,15 +1556,35 @@ class SettingsManager:
         for key, value in settings_items:
             if key == "llm.keep_model_loaded":
                 llm.set_keep_model_loaded(value)
+            if key == "load-llm-cpu" and hasattr(llm, "set_load_llm_cpu"):
+                llm.set_load_llm_cpu(bool(value))
             if key == "stream.yt.videoid":
                 chat_fetch.video_id = value
+            if key == "input_mode":
+                clean_mode = str(value).lower().strip()
+                if clean_mode in ("always_listening", "wake_word", "push_to_talk") and 'voice_input' in globals():
+                    voice_input.input_mode = clean_mode
+                    logger.info(f"[Settings] VoiceInput input_mode set to '{clean_mode}'")
+
+        # In demo mode, ensure settings lock to Kokoro and af_heart
+        try:
+            from demo_safety import is_demo_mode_active
+            demo_mode_active = is_demo_mode_active()
+        except Exception:
+            demo_mode_active = False
+
+        if demo_mode_active:
+            self.settings["tts.provider"] = "kokoro"
+            if self.settings.get("tts.voice") not in ("af_heart", "am_adam", "af_bella", "af_alloy"):
+                self.settings["tts.voice"] = "af_heart"
+            settings_items = list(self.settings.items())
 
         # Apply TTS provider FIRST, then voice — order matters so voice is set on the correct engine
         for key, value in settings_items:
             if key == "tts.provider":
                 try:
-                    tts.set_provider(value)
-                    logger.info(f"[Settings] TTS provider set to '{value}'")
+                    tts.set_provider("kokoro" if demo_mode_active else value)
+                    logger.info(f"[Settings] TTS provider set to '{'kokoro' if demo_mode_active else value}'")
                 except ValueError as e:
                     logger.warning(f"Saved TTS provider '{value}' is invalid: {e}")
 
@@ -1244,9 +1633,31 @@ class SettingsManager:
             llm.update_sampling_params(llm_sampling_params)
 
     def update_settings(self, updated_settings: Dict[str, Any]):
-        self.settings.update(updated_settings)
+        # Filter to settings that actually changed
+        changed = {k: v for k, v in updated_settings.items() if self.settings.get(k) != v}
+        if not changed:
+            return
+        self.settings.update(changed)
         self.save_settings(self.settings)
-        self.apply_settings()
+        # Apply specific settings without unneeded full model reload
+        for key, value in changed.items():
+            if key == "llm.model_filename":
+                llm.load_model_by_filename(value)
+            elif key == "input_mode" and "voice_input" in globals():
+                voice_input.input_mode = str(value).lower().strip()
+            elif key == "tts.provider":
+                tts.set_provider(value)
+            elif key == "tts.voice":
+                try:
+                    tts.change_voice(value)
+                except Exception:
+                    pass
+            elif key == "tts.kokoro.speed":
+                try:
+                    engine = tts._get_instance("kokoro")
+                    engine.set_speed(float(value))
+                except Exception:
+                    pass
 
 # Initialize the SettingsManager
 SETTINGS_FILE = "settings.json"
@@ -1254,8 +1665,10 @@ settings_manager = SettingsManager(SETTINGS_FILE)
 
 # Apply settings on startup
 start_time = time.time()
+startup_progress.get_subsystem("settings").start("Applying persisted settings...")
 startup_progress.show_step("Applying Settings")
 settings_manager.apply_settings()
+startup_progress.get_subsystem("settings").complete("Persisted settings active")
 startup_progress.complete_step(f"Settings applied in {time.time() - start_time:.2f}s")
 
 # Warm up TTS to reduce first request latency
@@ -1268,11 +1681,10 @@ except Exception as e:
     startup_progress.complete_step(f"TTS warm-up failed (non-critical) in {time.time() - start_time:.2f}s")
     logger.warning(f"TTS warm-up failed (non-critical): {e}")
 
-# Log startup time
+# Log startup time (readiness is dynamically checked across required subsystems)
 startup_time = time.time() - total_start_time
-startup_progress.complete_step(f"✅ Server Ready in {startup_time:.2f}s at {datetime.now().strftime('%H:%M:%S')}")
-startup_progress.is_ready = True
-startup_progress.current_message = "All Systems Ready"
+startup_progress.complete_step(f"Initial server boot in {startup_time:.2f}s at {datetime.now().strftime('%H:%M:%S')}")
+startup_progress._check_readiness()
 
 # *******************************
 # Settings API
@@ -1304,7 +1716,7 @@ async def get_settings():
 # *******************************
 
 class CreateSessionRequest(BaseModel):
-    title: str
+    title: Optional[str] = None
 
 @app.post("/api/chat/session/create")
 async def create_chat_session(request: CreateSessionRequest):
@@ -1324,6 +1736,25 @@ async def update_chat_session(request: UpdateSessionRequest):
     try:
         success = history_store.update_session(request.session_id, request.history)
         if success:
+            async def _bg_title():
+                try:
+                    loop = asyncio.get_event_loop()
+                    new_title = await loop.run_in_executor(None, history_store.generate_title_from_history, request.session_id)
+                    if new_title:
+                        dead_clients = set()
+                        for c in list(clients):
+                            try:
+                                await c.send_json({
+                                    "type": "session_title_updated",
+                                    "session_id": request.session_id,
+                                    "title": new_title
+                                })
+                            except Exception:
+                                dead_clients.add(c)
+                        clients.difference_update(dead_clients)
+                except Exception:
+                    pass
+            asyncio.create_task(_bg_title())
             return JSONResponse(status_code=200, content={"message": "Session updated successfully"})
         return JSONResponse(status_code=404, content={"error": "Session not found"})
     except Exception as e:
@@ -1333,6 +1764,18 @@ async def update_chat_session(request: UpdateSessionRequest):
 class UpdateSessionTitleRequest(BaseModel):
     session_id: str
     title: str
+
+@app.post("/api/chat/session/{session_id}/generate-title")
+async def generate_chat_session_title(session_id: str):
+    try:
+        loop = asyncio.get_event_loop()
+        new_title = await loop.run_in_executor(None, history_store.generate_title_from_history, session_id)
+        if new_title:
+            return JSONResponse(status_code=200, content={"status": "ok", "title": new_title})
+        return JSONResponse(status_code=200, content={"status": "unchanged"})
+    except Exception as e:
+        logger.error(f"Error generating title for session {session_id}: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/api/chat/session/update-title")
 async def update_chat_session_title(request: UpdateSessionTitleRequest):
@@ -1552,7 +1995,7 @@ app.middleware("http")(create_proxy_middleware("/api/rvc", rvc_server_port))
 
 if __name__ == "__main__":
     try:
-        uvicorn.run(app, host="0.0.0.0", port=8000)
+        uvicorn.run(app, host="127.0.0.1", port=8000)
     finally:
         # Stop all managed processes on shutdown
         process_manager.stop_all_servers()

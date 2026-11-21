@@ -1,17 +1,144 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { SidebarProvider } from "@/components/ui/sidebar"
 import { AppSidebar } from "@/components/app-sidebar"
 import pageMapping from "@/constants/page-mapping"
+import { globalStateManager } from "@/lib/globalStateManager"
+import { chatManager } from "@/lib/chatManager"
+import { useSettings } from "@/context/SettingsContext"
+import { Mic, Radio, HandMetal, Info } from "lucide-react"
 
 type PageKey = keyof typeof pageMapping
 
+const formatInputMode = (mode: string) => {
+    switch (mode?.toLowerCase()?.trim()) {
+        case "wake_word":
+            return {
+                label: "Wake Word",
+                icon: <Mic className="h-3.5 w-3.5 text-sky-400 inline mr-1" />,
+                description: 'Say "Hey Kyoma"'
+            };
+        case "always_listening":
+            return {
+                label: "Always Listening",
+                icon: <Radio className="h-3.5 w-3.5 text-emerald-400 inline mr-1" />,
+                description: 'Continuous voice recognition'
+            };
+        case "push_to_talk":
+            return {
+                label: "Push to Talk",
+                icon: <HandMetal className="h-3.5 w-3.5 text-amber-400 inline mr-1" />,
+                description: 'Hold button or shortcut'
+            };
+        default:
+            const formatted = mode ? mode.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase()) : "Unknown";
+            return {
+                label: formatted,
+                icon: <Info className="h-3.5 w-3.5 text-slate-400 inline mr-1" />,
+                description: formatted
+            };
+    }
+};
+
 function Mainpage() {
     const [currentPage, setCurrentPage] = useState<PageKey>("llm")
+    const [systemState, setSystemState] = useState<string>("IDLE")
+    const { settings } = useSettings()
+    const [inputMode, setInputMode] = useState<string>(() => settings["input_mode"] || globalStateManager.getState("inputMode") || "wake_word")
+    const [lastCommand, setLastCommand] = useState<string>("")
+    const [lastResponse, setLastResponse] = useState<string>("")
+
+    useEffect(() => {
+        if (settings["input_mode"] && settings["input_mode"] !== inputMode) {
+            setInputMode(settings["input_mode"]);
+            globalStateManager.updateState("inputMode", settings["input_mode"]);
+        }
+    }, [settings["input_mode"]]);
+
+    useEffect(() => {
+        const updateDerivedState = () => {
+            const isThinking = globalStateManager.getState('isLLMThinking');
+            const isSpeaking = globalStateManager.getState('isTTSPlaying');
+            const isRec = globalStateManager.getState('isVoiceRecording');
+
+            if (isThinking) {
+                setSystemState("THINKING");
+            } else if (isSpeaking) {
+                setSystemState("SPEAKING");
+            } else if (isRec) {
+                setSystemState("LISTENING");
+            } else {
+                setSystemState("IDLE");
+            }
+        };
+
+        const unsubMode = globalStateManager.subscribe("inputMode", (mode) => {
+            if (mode) setInputMode(mode);
+        });
+        const unsubLLM = globalStateManager.subscribe('isLLMThinking', () => {
+            updateDerivedState();
+        });
+        const unsubTTS = globalStateManager.subscribe('isTTSPlaying', () => {
+            updateDerivedState();
+        });
+        const unsubRec = globalStateManager.subscribe('isVoiceRecording', () => {
+            updateDerivedState();
+        });
+        const unsubChat = chatManager.subscribe((messages) => {
+            if (messages && messages.length > 0) {
+                const userMsgs = messages.filter((m) => m.role === 'user');
+                const asstMsgs = messages.filter((m) => m.role === 'assistant');
+                if (userMsgs.length > 0) setLastCommand(userMsgs[userMsgs.length - 1].content || "");
+                if (asstMsgs.length > 0) setLastResponse(asstMsgs[asstMsgs.length - 1].content || "");
+            }
+        });
+
+        return () => {
+            unsubMode();
+            unsubLLM();
+            unsubTTS();
+            unsubRec();
+            unsubChat();
+        };
+    }, []);
 
     return (
         <SidebarProvider open={false}>
             <AppSidebar onItemClick={setCurrentPage} activePage={currentPage} />
             <div className="flex flex-col w-full h-screen">
+                {/* Demo status bar - pinned outside scroll area */}
+                <header className="shrink-0 h-9 bg-muted/40 border-b px-4 flex items-center justify-between text-xs text-muted-foreground z-20 select-none">
+                    <div className="flex items-center space-x-3 shrink-0">
+                        <span className="font-semibold text-foreground tracking-wide">KYOMA Status:</span>
+                        <span className="inline-flex items-center gap-1.5">
+                            <span className={`h-2 w-2 rounded-full ${
+                                systemState === "LISTENING" ? "bg-green-500 animate-pulse" :
+                                systemState === "THINKING" ? "bg-amber-500 animate-pulse" :
+                                systemState === "SPEAKING" ? "bg-blue-500 animate-pulse" : "bg-gray-400"
+                            }`} />
+                            <strong className="text-foreground font-mono">{systemState}</strong>
+                        </span>
+                        <span className="hidden sm:inline">
+                            Mode:{" "}
+                            <span
+                                className="font-medium text-foreground inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-background/60 border border-border/50 text-[11px]"
+                                title={formatInputMode(inputMode).description}
+                            >
+                                {formatInputMode(inputMode).icon}
+                                {formatInputMode(inputMode).label}
+                            </span>
+                        </span>
+                    </div>
+                    {(lastCommand || lastResponse) && (
+                        <div 
+                            className="truncate max-w-md md:max-w-xl text-right text-xs" 
+                            title={`${lastCommand ? `Command: ${lastCommand}` : ''}${lastResponse ? `
+Response: ${lastResponse}` : ''}`}
+                        >
+                            {lastCommand && <span className="mr-2 opacity-80">Last: &ldquo;{lastCommand}&rdquo;</span>}
+                            {lastResponse && <span className="text-foreground font-medium">&rarr; &ldquo;{lastResponse.length > 40 ? lastResponse.slice(0, 40) + '...' : lastResponse}&rdquo;</span>}
+                        </div>
+                    )}
+                </header>
                 <main className="flex-1 relative">
                     {Object.entries(pageMapping).map(([key, { page: PageComponent }]) => {
                         const isActive = currentPage === key;

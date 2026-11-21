@@ -1,7 +1,8 @@
 import sys
 import os
+import asyncio
 import threading
-from typing import Generator, List, Dict
+from typing import Generator, List, Dict, Optional, Callable
 from .BaseLLM import BaseLLM
 from services.lib.LAV_logger import logger
 
@@ -9,6 +10,35 @@ from services.lib.LAV_logger import logger
 kyoma_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "Kyoma"))
 if kyoma_dir not in sys.path:
     sys.path.append(kyoma_dir)
+
+# ── External hook ─────────────────────────────────────────────────────────────
+# Set by server.py after init so KyomaLLM can broadcast state during a search
+# without taking a hard dependency on the server module.
+# Signature: async def broadcast_thinking(state: str) -> None
+_broadcast_thinking_hook: Optional[Callable] = None
+_event_loop_ref: Optional[asyncio.AbstractEventLoop] = None
+
+def set_search_broadcast_hook(loop: asyncio.AbstractEventLoop, coro_factory: Callable):
+    """
+    Called once from server.py after startup.
+    coro_factory(state: str) -> Coroutine that broadcasts state to WebUI + ESP32.
+    """
+    global _broadcast_thinking_hook, _event_loop_ref
+    _broadcast_thinking_hook = coro_factory
+    _event_loop_ref = loop
+
+
+def _fire_state_broadcast(state: str):
+    """
+    Thread-safe: schedule a state broadcast on the server's event loop.
+    Called from the synchronous executor thread during search.
+    """
+    if _broadcast_thinking_hook and _event_loop_ref:
+        try:
+            asyncio.run_coroutine_threadsafe(_broadcast_thinking_hook(state), _event_loop_ref)
+        except Exception as _be:
+            logger.debug(f"[KyomaLLM] State broadcast failed (non-fatal): {_be}")
+
 
 class KyomaLLM(BaseLLM):
     def __init__(self, model_name: str = "Kyoma"):
@@ -62,6 +92,17 @@ class KyomaLLM(BaseLLM):
             yield f"Error: Kyoma automation module could not be loaded: {self._load_error}"
             return
 
+        # -- Step 0: Check pending action / slot-filling follow-up -----------
+        try:
+            from pending_actions import handle_pending_followup
+            pending_resp, pending_handled = handle_pending_followup(text)
+            if pending_handled and pending_resp:
+                logger.info(f'[PendingActions] Follow-up fulfilled: {text!r} -> {pending_resp!r}')
+                yield pending_resp
+                return
+        except Exception as _pa_err:
+            logger.debug(f'[PendingActions] Check error (ignored): {_pa_err}')
+
         # ── Fast path: direct command execution without LLM ─────────────────
         # Matches simple, unambiguous commands (volume, brightness, media, apps,
         # system info, etc.) and executes them instantly — saving ~1.5-5s per call.
@@ -74,6 +115,27 @@ class KyomaLLM(BaseLLM):
                 return
         except Exception as _fr_err:
             logger.warning(f"[FastRouter] Error (falling through to LLM): {_fr_err}")
+
+        # ── Search fast-path: detect search intent, give immediate feedback ──
+        # Check before full Ollama workflow to skip the first LLM tool-selection call.
+        try:
+            from ollama_workflow import is_search_query
+            import random
+            if is_search_query(text):
+                logger.info(f"[KyomaLLM] Search intent detected: {text!r}")
+                ack_phrases = [
+                    "Let me look that up for you.",
+                    "Checking that now.",
+                    "Looking that up right away.",
+                    "Let me check that online for you.",
+                    "Searching for that now."
+                ]
+                ack = random.choice(ack_phrases)
+                # Yield acknowledgement as a standalone message separated by special delimiter
+                yield f"{ack}\n<<<KYOMA_SEARCH_SPLIT>>>\n"
+                _fire_state_broadcast("thinking")
+        except Exception as _si_err:
+            logger.debug(f"[KyomaLLM] Search intent check error (ignored): {_si_err}")
 
         # ── Slow path: full Ollama LLM + tool-call pipeline ─────────────────
         try:
