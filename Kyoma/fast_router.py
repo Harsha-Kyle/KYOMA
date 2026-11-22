@@ -187,7 +187,7 @@ _R: dict[str, list[str]] = {
     "prev_track":      ["Previous track.", "Going back one track.", "Playing the previous one."],
     "restart_track":   ["Playing from the beginning.", "Restarting from the top.", "Track restarted."],
     "greeting":        ["Hello! How can I help you today?", "Hey there! What can I do for you?", "Hi! Ready when you are.", "Greetings! How may I assist?"],
-    "name":            ["I'm KYOMA, your AI desktop companion.", "I am KYOMA, your personal assistant.", "KYOMA here, at your service."],
+    "name":            ["I'm KYOMA, your physical AI desktop companion.", "I am KYOMA, your physical AI desktop companion.", "KYOMA here, your physical AI desktop companion."],
     "doing":           ["I'm doing great and ready to assist.", "All systems running smoothly and ready to help.", "Doing well, thanks for asking! What's on your mind?"],
     "thanks":          ["You're very welcome!", "Happy to help!", "Anytime! Let me know if you need anything else.", "My pleasure!"],
     "bye":             ["Goodbye! Have a great day.", "See you later!", "Take care! Standing by whenever you need me.", "Farewell! Have a wonderful day."],
@@ -261,13 +261,70 @@ _RE_REMINDERS  = re.compile(r"\b(?:(?:list|show|view|check|read|get)(?:\s+all)?(
 _RE_GREETING     = re.compile(r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening)|howdy|greetings)[\!\.\?\s]*$", _F)
 _RE_SAY_HI_TO    = re.compile(r"\b(?:say\s+(?:hi|hello)\s+to|greet)\s+([a-zA-Z\s]+)[\!\.\?\s]*$", _F)
 _RE_NAME         = re.compile(r"^(?:what(?:'s|\s+is)\s+your\s+name|who\s+are\s+you|introduce\s+yourself)[\!\.\?\s]*$", _F)
-_RE_DOING        = re.compile(r"^(?:what\s+are\s+you\s+doing|how\s+are\s+you(?:\s+doing)?|how's\s+it\s+going)[\!\.\?\s]*$", _F)
+_RE_DOING        = re.compile(r"^(?:what\s+are\s+you\s+doing|how\s+(?:are\s+)?you(?:\s+doing)?|how's\s+it\s+going)[\!\.\?\s]*$", _F)
 _RE_THANKS       = re.compile(r"^(?:thanks|thank\s+you(?:\s+very\s+much|\s+so\s+much)?)[\!\.\?\s]*$", _F)
 _RE_BYE          = re.compile(r"^(?:bye|goodbye|see\s+you(?:\s+later)?|farewell|exit)[\!\.\?\s]*$", _F)
 _RE_TYPO_CORRECT = re.compile(r"\b(?:i\s+(?:miss[\s\-]?typed|misstyped|mistyped|meant\s+to\s+(?:say|type)|meant)|that\s+was\s+a\s+typo|typo\s+sorry|sorry\s+typo)\b", _F)
 _RE_OPEN_BARE    = re.compile(r"^(?:open|launch|start)[\!\.\?\s]*$", _F)
-_RE_WHO          = re.compile(r"^(?:who\s+are\s+you|tell\s+me\s+about\s+yourself|introduce\s+yourself|what\s+are\s+you|describe\s+yourself)[\!\.\?\s]*$", _F)
-_RE_CAPABILITIES = re.compile(r"\b(?:what\s+(?:all\s+)?(?:can\s+you\s+do|you\s+can\s+do)|what\s+are\s+your\s+(?:capabilities|features)|state\s+your\s+features|list\s+your\s+features|help\s+me)\b", _F)
+_RE_WHO          = re.compile(r"^(?:who\s+are\s+you|tell\s+me\s+about\s+yourself|introduce\s+yourself|what\s+are\s+you|describe\s+yourself|who\s+made\s+you|who\s+created\s+you|who\s+built\s+you)[\!\.\?\s]*$", _F)
+_RE_FIRST_QUESTION = re.compile(r"^(?:what\s+was\s+my\s+first\s+(?:question|message|query)|what\s+did\s+i\s+(?:first\s+ask|ask\s+first))[\!\.\?\s]*$", _F)
+_RE_CAPABILITIES = re.compile(r"^(?:what\s+(?:all\s+)?(?:can\s+you\s+do|you\s+can\s+do)|what\s+are\s+your\s+(?:capabilities|features)|state\s+your\s+features|list\s+your\s+features|help\s+me)[\!\.\?\s]*$", _F)
+
+# ── Persona constant ─────────────────────────────────────────────────────────
+KYOMA_PERSONA = "I'm KYOMA, your physical AI desktop companion."
+
+# ── Typo tolerance: edit-distance ≤ 1 for short fixed greetings ──────────────
+_FUZZY_MAP: dict[str, str] = {}
+
+def _build_fuzzy_map():
+    """Pre-build edit-distance-1 variants for short fixed words."""
+    targets = {
+        "hi": "greeting", "hey": "greeting", "hello": "greeting",
+        "thanks": "thanks", "ok": "ok", "bye": "bye",
+    }
+    alpha = "abcdefghijklmnopqrstuvwxyz"
+    for word, key in targets.items():
+        _FUZZY_MAP[word] = key
+        # Substitutions
+        for i in range(len(word)):
+            for c in alpha:
+                if c != word[i]:
+                    variant = word[:i] + c + word[i+1:]
+                    if variant not in _FUZZY_MAP and len(variant) >= 2:
+                        _FUZZY_MAP[variant] = key
+        # Deletions (only if result is ≥ 2 chars)
+        for i in range(len(word)):
+            variant = word[:i] + word[i+1:]
+            if len(variant) >= 2 and variant not in _FUZZY_MAP:
+                _FUZZY_MAP[variant] = key
+        # Insertions
+        for i in range(len(word) + 1):
+            for c in alpha:
+                variant = word[:i] + c + word[i:]
+                if variant not in _FUZZY_MAP:
+                    _FUZZY_MAP[variant] = key
+
+_build_fuzzy_map()
+
+# ── Keyboard mash detection ──────────────────────────────────────────────────
+def _is_keyboard_mash(text: str) -> bool:
+    """Detect meaningless keyboard mash like 'hgfj', 'asdf', 'qwert'."""
+    t = text.lower().strip().rstrip("!?.").strip()
+    if len(t) < 3 or len(t) > 10:
+        return False
+    # Must be all alpha
+    if not t.isalpha():
+        return False
+    # If it's a known word or fuzzy match, it's not mash
+    if t in _FUZZY_MAP:
+        return False
+    # Check consonant density: mash tends to have many consonants
+    vowels = sum(1 for c in t if c in "aeiou")
+    if vowels == 0 and len(t) >= 3:
+        return True
+    if len(t) >= 4 and vowels / len(t) < 0.15:
+        return True
+    return False
 _RE_STATUS     = re.compile(r"\b(?:what(?:'s|\s+is)\s+(?:the\s+)?status|system\s+status|pc\s+status|device\s+status|^status$)\b", _F)
 
 # Word numbers mapping for reminder intervals
@@ -337,6 +394,18 @@ def _extract_result(raw) -> str:
             return str(raw.get("out", "Done."))
         return f"Error: {raw.get('error', 'unknown')}"
     return str(raw) if raw is not None else "Done."
+
+def _record_fast_router_turn(user_text: str, assistant_text: str):
+    """Record user and assistant turns in memory_manager so FastRouter turns are remembered."""
+    try:
+        import Kyoma_automation
+        mem = getattr(Kyoma_automation, "memory", None)
+        if mem is not None:
+            mem.add_user_message(user_text)
+            if assistant_text:
+                mem.add_assistant_message(text=assistant_text)
+    except Exception:
+        pass
 
 def _is_plausible_name(name: str) -> bool:
     """Reject match groups that are obviously not an app/site name."""
@@ -430,7 +499,10 @@ def route(text: str) -> Tuple[Optional[str], bool]:
         # 1. If the command is an explicit parameterized screenshot ("take a screenshot and save it as..."),
         # handle it directly without splitting on the conjunction "and".
         if _RE_SCREENSHOT.search(cleaned):
-            return _route(cleaned)
+            res_text, res_handled = _route(cleaned)
+            if res_handled:
+                _record_fast_router_turn(text, res_text)
+            return res_text, res_handled
 
         m_inc = re.match(r'^(increase|raise|turn up|boost)\s+(brightness|volume)\s+(?:and|also)\s+(brightness|volume)[\.\?\!]*$', cleaned, re.IGNORECASE)
         if m_inc:
@@ -447,48 +519,33 @@ def route(text: str) -> Tuple[Optional[str], bool]:
                 parts = [p.strip().rstrip(".?!").strip() for p in delimiters.split(cleaned) if p.strip()]
 
         if len(parts) > 1:
-            # Multi-command check: Dry-run check first to prevent partial execution side-effects
-            real_tools = _get_tools()  # Force load if not already loaded
-            backed_up_tools = dict(_tools)
-            
-            # Build mock tools
-            mock_tools = {}
-            for k in backed_up_tools.keys():
-                if k == "get_volume" or k == "get_brightness":
-                    mock_tools[k] = lambda *a, **kw: 50
-                else:
-                    mock_tools[k] = lambda *a, **kw: {"ok": True, "out": "OK"}
-                    
-            # Swap tools to dry-run mocks
-            _tools = mock_tools
-            
-            all_matched = True
+            # Check how many parts match
+            matched_responses = []
+            unrecognized_clauses = []
             for part in parts:
-                _, matched = _route(part)
-                if not matched:
-                    all_matched = False
-                    break
-                    
-            # Restore real tools
-            _tools = backed_up_tools
-            
-            if all_matched:
-                # Execute all parts for real
-                responses = []
-                for part in parts:
-                    resp, matched = _route(part)
-                    if matched and resp:
-                        responses.append(resp)
-                return _natural_join(responses), True
+                resp, matched = _route(part)
+                if matched and resp:
+                    matched_responses.append(resp)
+                else:
+                    unrecognized_clauses.append(part)
+
+            if matched_responses:
+                # If all matched or some matched: execute recognized, acknowledge unrecognized clauses
+                combined = _natural_join(matched_responses)
+                if unrecognized_clauses:
+                    unrec_summary = ", ".join(f'"{c}"' for c in unrecognized_clauses)
+                    combined += f" (Note: I didn't recognize {unrec_summary}.)"
+                _record_fast_router_turn(text, combined)
+                return combined, True
             else:
-                # Multi-part conjunction query where some part did not match an exact tool:
-                # Do NOT fall through to partial action matching! Fall through to Ollama LLM
-                # so compound/complex sentences like "Set a reminder and we'll take a screenshot"
-                # or "What is your name and explain about yourself?" are processed coherently.
+                # None matched
                 return None, False
 
         # 2. Check direct single-command match if not a multi-command or if multi-command didn't match all parts
-        return _route(cleaned)
+        res_text, res_handled = _route(cleaned)
+        if res_handled:
+            _record_fast_router_turn(text, res_text)
+        return res_text, res_handled
     except Exception:
         traceback.print_exc()
         return None, False
@@ -898,7 +955,17 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
         return None, False
 
     if _RE_WHO.search(text):
-        return "I'm KYOMA, your AI desktop companion.", True
+        return KYOMA_PERSONA, True
+
+    if _RE_FIRST_QUESTION.search(text):
+        try:
+            import Kyoma_automation
+            first_q = getattr(getattr(Kyoma_automation, "memory", None), "first_user_message", None)
+            if first_q:
+                return f"Your first question was: \"{first_q}\"", True
+            return "You haven't asked any previous questions yet.", True
+        except Exception:
+            return "You haven't asked any previous questions yet.", True
 
     if _RE_CAPABILITIES.search(text):
         return ("I control volume, brightness, apps, screenshots, "
@@ -1008,6 +1075,23 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
                 # Let LLM handle it — maybe it knows a better approach
                 return None, False
             return _say("open_app", n=name.title()), True
+
+    # ── KEYBOARD MASH DETECTION ─────────────────────────────────────────────
+    if _is_keyboard_mash(text):
+        return "Didn't catch that.", True
+
+    # ── FUZZY TYPO MATCHING (edit-distance ≤ 1 for short fixed inputs) ────
+    fuzzy_key = text.lower().strip().rstrip("!?.").strip()
+    if fuzzy_key in _FUZZY_MAP:
+        matched_key = _FUZZY_MAP[fuzzy_key]
+        if matched_key == "greeting":
+            return _say("greeting"), True
+        elif matched_key == "thanks":
+            return _say("thanks"), True
+        elif matched_key == "bye":
+            return _say("bye"), True
+        elif matched_key == "ok":
+            return "Got it!", True
 
     # No rule matched
     return None, False

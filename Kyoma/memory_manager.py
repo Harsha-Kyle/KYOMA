@@ -3,8 +3,11 @@ class MemoryManager:
         # 4 user/assistant turns = 8 messages total
         self.max_history = max_history
         self.history = []
+        self.first_user_message = None
 
     def add_user_message(self, text):
+        if self.first_user_message is None and text:
+            self.first_user_message = text
         self.history.append({"role": "user", "content": text})
         self._trim()
 
@@ -34,3 +37,4 @@ class MemoryManager:
 
     def clear(self):
         self.history = []
+        self.first_user_message = None
