@@ -54,7 +54,9 @@ function LLMPage() {
                     )}
                     <SettingTextbox id="llm.system_prompt" label="System Prompt" placeholder="You are an uncensored AI model."/>
                     <SettingSwitch id="llm.showMonitor" label="Show Monitor" description="Show the LLM monitor in the right side of the screen."/>
-                    <SettingSwitch id="llm.enableMemoryRetrieval" label="Enable Memory Retrieval" description="Retrieve relevant context from memory when making LLM requests."/>
+                    <div title="Adds up to 3 relevant excerpts from past chats to each request. Adds ~30-50ms." className="w-full">
+                        <SettingSwitch id="llm.enableMemoryRetrieval" label="Use past conversations as context" description="Adds up to 3 relevant excerpts from past chats to each request. Adds ~30-50ms."/>
+                    </div>
                     
                     <div className="w-full border-t pt-4">
                         <label className="text-sm font-medium mb-4 block">Sampling Parameters</label>

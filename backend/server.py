@@ -1984,6 +1984,10 @@ class QueryContextRequest(BaseModel):
 @app.post("/api/memory/context")
 async def query_memory_context(request: QueryContextRequest):
     try:
+        # Check if memory retrieval is enabled in settings (default OFF)
+        enable_mem = settings_manager.settings.get("llm.enableMemoryRetrieval", False)
+        if not enable_mem:
+            return JSONResponse(status_code=200, content={"context": []})
         response = memory.query(text=request.text, limit=request.limit)
         return JSONResponse(status_code=200, content={"context": response})
     except Exception as e:
