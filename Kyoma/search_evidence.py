@@ -5,6 +5,7 @@ import html
 import requests
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
@@ -349,7 +350,7 @@ def search_web_evidence(query: str, max_results: int = 3) -> dict:
             w_res = _fetch_weather(city_cand)
             results.extend(w_res)
 
-    # Parallel retrieval across News & Wikipedia with per-source timeout
+    # Parallel retrieval across News & Wikipedia with hard-cap at 3.0 seconds
     futures = []
     with ThreadPoolExecutor(max_workers=4) as pool:
         # News queries
@@ -360,7 +361,7 @@ def search_web_evidence(query: str, max_results: int = 3) -> dict:
             futures.append(pool.submit(_fetch_wikipedia, v))
 
         try:
-            for f in as_completed(futures, timeout=3.5):
+            for f in as_completed(futures, timeout=3.0):
                 try:
                     sub_results = f.result()
                     for item in sub_results:
@@ -375,8 +376,8 @@ def search_web_evidence(query: str, max_results: int = 3) -> dict:
                         break
                 except Exception:
                     pass
-        except TimeoutError:
-            # Partial results collected so far are preserved and used
+        except (TimeoutError, concurrent.futures.TimeoutError):
+            # Partial results collected so far by the deadline are preserved and used
             pass
 
     if not results:
