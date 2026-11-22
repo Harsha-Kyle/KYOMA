@@ -168,33 +168,36 @@ const Chatbox = () => {
     };
 
     const handleDeleteSession = async (sessionId: string) => {
+        const remaining = sessionList.filter(s => s.id !== sessionId);
+        setSessionList(remaining);
+
+        if (selectedSession === sessionId) {
+            // Synchronously switch or create, clear chat view to prevent in-flight writes
+            chatManager.setSessionId(null);
+            setDisplayedMessages([]);
+
+            if (remaining.length > 0) {
+                const nextId = remaining[0].id;
+                setSelectedSession(nextId);
+                chatManager.setSessionId(nextId);
+                sessionStorage.setItem("kyoma_launch_session_id", nextId);
+            } else {
+                setSelectedSession(null);
+                createNewSession().then(newId => {
+                    if (newId) {
+                        setSelectedSession(newId);
+                        chatManager.setSessionId(newId);
+                        sessionStorage.setItem("kyoma_launch_session_id", newId);
+                        getSessions();
+                    }
+                }).catch(() => {});
+            }
+        }
+
         try {
             await deleteSession(sessionId);
         } catch (err) {
             console.error('Failed to delete session on backend:', err);
-        }
-        const remaining = sessionList.filter(s => s.id !== sessionId);
-        setSessionList(remaining);
-        if (selectedSession === sessionId) {
-            if (remaining.length > 0) {
-                setSelectedSession(remaining[0].id);
-            } else {
-                createNewSession().then(newId => {
-                    if (newId) {
-                        setSelectedSession(newId);
-                        sessionStorage.setItem("kyoma_launch_session_id", newId);
-                        getSessions();
-                    } else {
-                        setSelectedSession(null);
-                        chatManager.setSessionId(null);
-                        setDisplayedMessages([]);
-                    }
-                }).catch(() => {
-                    setSelectedSession(null);
-                    chatManager.setSessionId(null);
-                    setDisplayedMessages([]);
-                });
-            }
         }
     };
 

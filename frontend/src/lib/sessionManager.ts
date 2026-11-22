@@ -25,11 +25,29 @@ export async function createNewSession(title?: string): Promise<string | null> {
 export async function updateSession(sessionId: string | null, history: HistoryItem[]) {
     if (sessionId === null) return;
     
-    const response = await apiFetch(`/api/chat/session/update`, {
+    let response = await apiFetch(`/api/chat/session/update`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId, history })
     });
+    
+    // On 404, recover/associate a valid session and retry exactly once
+    if (response.status === 404) {
+        console.warn(`[sessionManager] Session ${sessionId} returned 404 on update. Recovering valid session...`);
+        try {
+            const newSessionId = await createNewSession();
+            if (newSessionId) {
+                sessionStorage.setItem("kyoma_launch_session_id", newSessionId);
+                response = await apiFetch(`/api/chat/session/update`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: newSessionId, history })
+                });
+            }
+        } catch (recoverErr) {
+            console.error("[sessionManager] Recovery retry failed:", recoverErr);
+        }
+    }
     
     if (!response.ok) {
         console.error("Error updating session:", response.statusText);
