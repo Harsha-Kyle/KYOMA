@@ -39,8 +39,8 @@ export const apiFetch = async (url: string, opts: RequestInit = {}): Promise<Res
 
     const fetchPromise = (async () => {
       try {
-        const response = await fetch(url, { ...opts, headers });
-        if (response.ok) {
+        const response = await fetch(url, { ...opts, headers, cache: 'no-store' });
+        if (response.ok && response.status >= 200 && response.status < 300) {
           try {
             const clone = response.clone();
             const data = await clone.json();
@@ -58,6 +58,9 @@ export const apiFetch = async (url: string, opts: RequestInit = {}): Promise<Res
           }
         }
         return response;
+      } catch (err) {
+        // Never retain failed cached promises
+        throw err;
       } finally {
         inFlightGets.delete(url);
       }

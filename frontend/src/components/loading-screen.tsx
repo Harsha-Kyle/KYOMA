@@ -292,8 +292,13 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
 
   useEffect(() => {
     let isCancelled = false;
-    let pollInterval: ReturnType<typeof setInterval>;
-    let currentPct = 6;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    let currentPct = 0;
+
+    const scheduleNextPoll = (delayMs: number = 500) => {
+      if (isCancelled) return;
+      pollTimer = setTimeout(checkStatus, delayMs);
+    };
 
     const checkStatus = async () => {
       try {
@@ -303,10 +308,11 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
         const res = await fetch("/api/startup/status", {
           signal: controller.signal,
           headers: { "Cache-Control": "no-cache" },
+          cache: "no-store",
         });
         clearTimeout(timeoutId);
 
-        if (res.ok) {
+        if (res.ok && res.status !== 503) {
           const data = await res.json();
           if (isCancelled) return;
 
@@ -315,16 +321,18 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
             addLog(">>> KERNEL LINK ESTABLISHED [PORT 8000 ONLINE]");
           }
 
+          if (data.error) {
+            setSystemStateText(`ERROR: ${String(data.error).toUpperCase()}`);
+            addLog(`>>> Error reported during startup: ${data.error}`);
+          }
+
           if (data.ready) {
-            clearInterval(pollInterval);
-            // Smoothly advance progress based on actual readiness without hard clamp or jumping
-            const backendPct = typeof data.percentage === 'number' ? data.percentage : 90;
-            currentPct = Math.max(currentPct, Math.min(94, backendPct));
-            setProgress(currentPct);
+            // Reached readiness (100% only when ready=true)
+            setProgress(100);
             setSystemStateText("PRE-CACHING SYSTEM CONFIG & NEURAL ASSETS...");
             addLog(">>> Backend converged. Performing full state pre-cache...");
 
-            // Pre-load all primary assets simultaneously
+            // Pre-load all primary assets simultaneously after ready=true
             try {
               const [settingsRes, sessionsRes, modelsRes, _voicesRes, _kokoroRes, _live2dRes, _vrmRes] =
                 await Promise.allSettled([
@@ -372,14 +380,6 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
 
             if (isCancelled) return;
 
-            setProgress(96);
-            setSystemStateText("HYDRATING COCKPIT REGISTRY & DIALOGUE REPOSITORY...");
-            addLog(">>> Pre-cache verified. Initializing cockpit telemetry...");
-
-            await new Promise((r) => setTimeout(r, 400));
-            if (isCancelled) return;
-
-            setProgress(100);
             setDivergenceDigits(TARGET_WORLDLINE.split(""));
             setSystemStateText("ALL SYSTEMS SYNCHRONIZED // ENTERING TERMINAL");
             addLog(">>> Divergence ratio locked at 1.048596. Welcome back.");
@@ -391,12 +391,11 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
             }, 600);
             return;
           } else {
-            // Backend is up and reporting real stage progress from /api/startup/status
-            const backendPct = typeof data.percentage === 'number' ? data.percentage : 25;
-            // Never jump backwards; monotonically track real backend progress
-            currentPct = Math.max(currentPct, Math.min(92, backendPct));
+            // Backend reachable, show real backend stage and monotonic percentage (< 100)
+            const backendPct = typeof data.percentage === 'number' ? Math.min(99, data.percentage) : 10;
+            currentPct = Math.max(currentPct, backendPct);
             setProgress(currentPct);
-            setSystemStateText(data.message?.toUpperCase() || "STARTING REASONING DAEMON...");
+            setSystemStateText(data.stage?.toUpperCase() || data.message?.toUpperCase() || "STARTING BACKEND DAEMON...");
             if (data.message) addLog(`>>> ${data.message}`);
 
             const sMap = data.subsystems || {};
@@ -438,45 +437,30 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
                 status: "ONLINE",
               },
             ]);
+            scheduleNextPoll(500);
           }
+        } else {
+          // Backend returned 503 or non-OK: unreachable / starting
+          setBackendConnected(false);
+          setSystemStateText(`Starting backend… (${elapsedSeconds}s)`);
+          scheduleNextPoll(500);
         }
       } catch {
-        // Backend not yet reachable (typical during cold boot Python/Torch import phase)
+        // Backend not reachable
         if (isCancelled) return;
         setBackendConnected(false);
-
-        // Smooth predictable advance from 0% to 50% based on measured stage durations:
-        // Python imports dominate cold boot at ~60s. Server only responds after imports finish.
-        setElapsedSeconds((sec) => {
-          let calculatedPct = 0;
-          if (sec < 30) {
-            calculatedPct = (sec / 30) * 25; // 0% -> 25%
-            setSystemStateText("BOOT: LOADING PYTHON RUNTIME & AI MODULES (~60s)...");
-          } else if (sec < 60) {
-            calculatedPct = 25 + ((sec - 30) / 30) * 15; // 25% -> 40%
-            setSystemStateText("IMPORTING AI SERVICES & PYTORCH MODULES...");
-          } else if (sec < 90) {
-            calculatedPct = 40 + ((sec - 60) / 30) * 10; // 40% -> 50%
-            setSystemStateText("STARTING FASTAPI CORE & VOICE ENGINES...");
-          } else {
-            calculatedPct = Math.min(52, 50 + ((sec - 90) / 30) * 2); // 50% -> 52%
-            setSystemStateText("WAITING FOR BACKEND STARTUP TO COMPLETE...");
-          }
-          currentPct = Math.max(currentPct, Math.round(calculatedPct));
-          setProgress(currentPct);
-          return sec;
-        });
+        setSystemStateText(`Starting backend… (${elapsedSeconds}s)`);
+        scheduleNextPoll(500);
       }
     };
 
     checkStatus();
-    pollInterval = setInterval(checkStatus, 700);
 
     return () => {
       isCancelled = true;
-      clearInterval(pollInterval);
+      if (pollTimer) clearTimeout(pollTimer);
     };
-  }, [onLoaded, addLog]);
+  }, [onLoaded, addLog, elapsedSeconds]);
 
   // Segmented block bar calculation (28 blocks, Image 2 style)
   const TOTAL_SEGMENTS = 28;

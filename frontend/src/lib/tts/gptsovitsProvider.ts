@@ -15,11 +15,7 @@ export class GPTSoVITSProvider extends BaseTTSProvider {
 
     constructor() {
         super();
-        this.initialize();
-    }
-
-    private async initialize() {
-        await this.fetchVoices();
+        // Do not fetch voices prematurely in constructor before backend ready=true
     }
 
     // Add public method to refresh voices

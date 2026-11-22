@@ -17,11 +17,7 @@ export class KokoroProvider extends BaseTTSProvider {
 
     constructor() {
         super();
-        this.initialize();
-    }
-
-    private async initialize() {
-        await this.fetchVoices();
+        // Do not fetch voices prematurely in constructor before backend ready=true
     }
 
     async refreshVoices(): Promise<void> {

@@ -26,12 +26,7 @@ export class RVCProvider extends BaseTTSProvider {
 
     constructor() {
         super();
-        this.initialize();
-    }
-
-    private async initialize() {
-        await this.fetchVoices();
-        await this.fetchEdgeVoices();
+        // Do not fetch voices prematurely in constructor before backend ready=true
     }
 
     subscribe(callback: RVCStateUpdateCallback): () => void {
@@ -41,6 +36,11 @@ export class RVCProvider extends BaseTTSProvider {
 
     private notifySubscribers() {
         this.subscribers.forEach(callback => callback());
+    }
+
+    async refreshVoices(): Promise<void> {
+        await this.fetchVoices();
+        await this.fetchEdgeVoices();
     }
 
     private async fetchVoices() {
