@@ -274,21 +274,26 @@ def log_event(event):
 # ----------------------
 def init_db(target_path=None):
     db_file = target_path or get_db_path()
-    if not os.path.exists(db_file):
-        conn = sqlite3.connect(db_file)
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE reminders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                message TEXT,
-                time TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',
-                repeat_interval TEXT DEFAULT NULL
-            )
-        """)
-        conn.commit()
-        conn.close()
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            message TEXT,
+            time TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            repeat_interval TEXT DEFAULT NULL,
+            missed_announced INTEGER DEFAULT 0
+        )
+    """)
+    # Ensure missed_announced column exists if table was previously created without it
+    try:
+        c.execute("ALTER TABLE reminders ADD COLUMN missed_announced INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    conn.commit()
+    conn.close()
 
 init_db()
 
@@ -591,9 +596,30 @@ def trigger_missed_reminder(title, message, reminder_id):
             mark_reminder_completed(reminder_id)
         return 0
 
-    _speak_reminder(f"You missed a reminder: {title}.")
-    show_toast(f"Missed Reminder: {title}", f"{message}\n⏰ You missed it!", callback=on_click)
-    log_event(f"⚠️ [Missed                 ] reminder : '{title}' - retry scheduled in 5 minutes")
+    # Calculate overdue minutes for accurate missed announcement: "You missed: X, N min ago"
+    overdue_min = 0
+    try:
+        if reminder and reminder.get("time"):
+            rt = datetime.strptime(normalize_datetime(reminder["time"]), "%Y-%m-%d %H:%M:%S")
+            overdue_min = max(1, int((datetime.now() - rt).total_seconds() / 60))
+    except Exception:
+        overdue_min = 1
+
+    # Announce missed reminder once and persist announcement state
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT missed_announced FROM reminders WHERE id=?", (reminder_id,))
+    row = c.fetchone()
+    already_announced = bool(row[0]) if row else False
+    if not already_announced:
+        c.execute("UPDATE reminders SET missed_announced=1 WHERE id=?", (reminder_id,))
+        conn.commit()
+    conn.close()
+
+    if not already_announced:
+        _speak_reminder(f"You missed: {title}, {overdue_min} min ago.")
+    show_toast(f"Missed Reminder: {title}", f"{message}\n⏰ You missed it ({overdue_min} min ago)!", callback=on_click)
+    log_event(f"⚠️ [Missed                 ] reminder : '{title}' ({overdue_min} min overdue) - retry scheduled in 5 minutes")
 
     def retry_check():
         if not clicked["done"]:
@@ -775,12 +801,12 @@ def schedule_reminder(reminder, stagger_index=None):
 
     now = datetime.now()
     if remind_time <= now:
-        # If the reminder is older than 15 minutes, mark it missed/expired silently without firing audible alarm bursts
         overdue_seconds = (now - remind_time).total_seconds()
-        if overdue_seconds > 900:  # > 15 minutes
+        # Preserve overdue reminders less than 24 hours old (86400s) instead of deleting at 15 mins
+        if overdue_seconds > 86400:  # > 24 hours
             mark_reminder_completed(reminder_id)
-            log_event(f"ℹ️ [Stale Reminder Auto-Cleared] '{title}' was {overdue_seconds/60:.1f} mins overdue — marked completed.")
-            print(f"ℹ️ Auto-cleared stale reminder '{title}' ({overdue_seconds/60:.1f} mins overdue)")
+            log_event(f"ℹ️ [Stale Reminder Auto-Cleared] '{title}' was {overdue_seconds/3600:.1f} hours overdue (>24h) — marked completed.")
+            print(f"ℹ️ Auto-cleared stale reminder '{title}' ({overdue_seconds/3600:.1f} hours overdue)")
             return
 
         if stagger_index is not None:
