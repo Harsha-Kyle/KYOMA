@@ -196,7 +196,11 @@ class VoiceInput:
         if self.running:
             return
         self.running = True
+        # Reset mute state to a clean baseline when a new recording session starts.
+        # Any leftover ref_count from a previous session (e.g. a reminder that fired
+        # while recording was stopped) would otherwise leave the mic permanently muted.
         self.is_muted = False
+        self._mute_ref_count = 0
         self._reset_buffers()
         logger.info("Started recording")
 
