@@ -106,7 +106,7 @@ if not rvc_demo_mode and os.path.exists(rvc_runtime_python) and os.path.exists(r
     except Exception as e:
         logger.error(f"Error starting RVC server: {e}")
 else:
-    logger.warning("RVC server skipped: runtime or script not found. Please install the RVC standalone pack if required.")
+    logger.debug("RVC server skipped: runtime or script not found. Please install the RVC standalone pack if required.")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -367,18 +367,32 @@ async def run_startup_health_check() -> dict:
         startup_progress.get_subsystem("ollama").complete("Ollama daemon connected")
     else:
         startup_progress.get_subsystem("ollama").fail("Ollama unreachable on :11434")
-    logger.info(f"  [1/6] Ollama Service: {'HEALTHY (online)' if ollama_reachable else 'FAIL (unreachable)'}")
+    logger.info(f"  [1/7] Ollama Service: {'HEALTHY (online)' if ollama_reachable else 'FAIL (unreachable)'}")
 
-    # 2. gemma4:e2b loaded/available
+    # 2. Kyoma_automation import verification
+    automation_healthy = False
+    try:
+        kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
+        if kyoma_path not in sys.path:
+            sys.path.append(kyoma_path)
+        import Kyoma_automation
+        automation_healthy = True
+    except Exception as _ae:
+        automation_healthy = False
+        logger.error(f"[HealthCheck] Kyoma_automation import failed: {_ae}")
+    report["kyoma_automation_healthy"] = automation_healthy
+    logger.info(f"  [2/7] Kyoma Automation: {'HEALTHY (imported)' if automation_healthy else 'FAIL (import error)'}")
+
+    # 3. gemma4:e2b loaded/available
     gemma_available = any("gemma4:e2b" in m for m in models)
     report["gemma4_e2b_available"] = gemma_available
     if gemma_available:
         startup_progress.get_subsystem("model").complete("gemma4:e2b verified")
     else:
         startup_progress.get_subsystem("model").degrade("gemma4:e2b not found, using fallback")
-    logger.info(f"  [2/6] gemma4:e2b Model: {'HEALTHY (available)' if gemma_available else 'FAIL (not found in ollama list)'}")
+    logger.info(f"  [3/7] gemma4:e2b Model: {'HEALTHY (available)' if gemma_available else 'FAIL (not found in ollama list)'}")
 
-    # 3. Kokoro TTS ready
+    # 4. Kokoro TTS ready
     tts_ready = False
     try:
         tts_ready = (tts.provider == "kokoro" and getattr(tts, "kokoro", None) is not None)
@@ -388,9 +402,9 @@ async def run_startup_health_check() -> dict:
     except Exception:
         pass
     report["kokoro_tts_ready"] = tts_ready
-    logger.info(f"  [3/6] Kokoro TTS: {'HEALTHY (ready)' if tts_ready else 'FAIL (unavailable)'}")
+    logger.info(f"  [4/7] Kokoro TTS: {'HEALTHY (ready)' if tts_ready else 'FAIL (unavailable)'}")
 
-    # 4. Microphone functional
+    # 5. Microphone functional
     mic_open = False
     try:
         devices = sd.query_devices()
@@ -399,14 +413,14 @@ async def run_startup_health_check() -> dict:
     except Exception:
         pass
     report["microphone_ready"] = mic_open
-    logger.info(f"  [4/6] Microphone & STT: {'HEALTHY (detected & models loaded)' if mic_open else 'FAIL (no mic / STT init error)'}")
+    logger.info(f"  [5/7] Microphone & STT: {'HEALTHY (detected & models loaded)' if mic_open else 'FAIL (no mic / STT init error)'}")
 
-    # 5. ESP32 connected
+    # 6. ESP32 connected
     esp32_conn = len(esp32_clients) > 0
     report["esp32_connected"] = esp32_conn
-    logger.info(f"  [5/6] ESP32 Companion: {'CONNECTED' if esp32_conn else 'STANDBY (no clients connected)'}")
+    logger.info(f"  [6/7] ESP32 Companion: {'CONNECTED' if esp32_conn else 'STANDBY (no clients connected)'}")
 
-    # 6. Demo mode
+    # 7. Demo mode
     demo_active = False
     try:
         kyoma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Kyoma"))
@@ -417,7 +431,7 @@ async def run_startup_health_check() -> dict:
     except Exception as _dme:
         logger.debug(f"[HealthCheck] Demo mode check: {_dme}")
     report["demo_mode_active"] = demo_active
-    logger.info(f"  [6/6] Demo Mode Safety: {'ENABLED (strict presentation protections active)' if demo_active else 'DISABLED'}")
+    logger.info(f"  [7/7] Demo Mode Safety: {'ENABLED (strict presentation protections active)' if demo_active else 'DISABLED'}")
     logger.info("=" * 60)
 
     return report
@@ -427,7 +441,7 @@ async def run_startup_health_check() -> dict:
 async def get_startup_health():
     """API endpoint to query startup health report."""
     report = await run_startup_health_check()
-    all_ok = report["ollama_reachable"] and report["gemma4_e2b_available"] and report["kokoro_tts_ready"] and report["microphone_ready"]
+    all_ok = report["ollama_reachable"] and report["kyoma_automation_healthy"] and report["gemma4_e2b_available"] and report["kokoro_tts_ready"] and report["microphone_ready"]
     return JSONResponse(status_code=200 if all_ok else 503, content={"status": "healthy" if all_ok else "degraded", "checks": report})
 
 
@@ -957,9 +971,16 @@ async def async_generator_wrapper(generator):
             break
         yield item
 
+_llm_models_cache_time = 0.0
+
 @app.get("/api/llm/models")
 async def get_llm_models():
-    llm._load_available_models()
+    global _llm_models_cache_time
+    now = time.time()
+    # Cache model list for 30 seconds to prevent continuous disk re-scans
+    if not llm.all_model_data or now - _llm_models_cache_time > 30.0:
+        llm._load_available_models()
+        _llm_models_cache_time = now
     return JSONResponse(content={"models": llm.all_model_data, "currentModel": llm.current_model_data})
 
 # *******************************
