@@ -2,6 +2,11 @@ import time
 from typing import Dict, Any
 from .LAV_logger import logger
 
+# Record the moment this module is first imported — used as the authoritative
+# boot start time so progress is accurate even if StartupProgress.__init__
+# has non-trivial overhead in the future.
+_MODULE_IMPORT_TIME: float = time.time()
+
 class StartupSubsystem:
     def __init__(self, key: str, name: str, required: bool = True):
         self.key = key
@@ -70,7 +75,10 @@ class StartupSubsystem:
 
 class StartupProgress:
     def __init__(self):
-        self.boot_start_time = time.time()
+        # Use the module-level import time as the authoritative boot start,
+        # so elapsed_s reflects the true time since the process started
+        # importing — not just since StartupProgress() was constructed.
+        self.boot_start_time = _MODULE_IMPORT_TIME
         self.subsystems: Dict[str, StartupSubsystem] = {
             "imports": StartupSubsystem("imports", "Python Modules", required=True),
             "settings": StartupSubsystem("settings", "Settings Persistence", required=True),
@@ -127,6 +135,8 @@ class StartupProgress:
           model:       26.12s  (22.2%)  — Gemma warmup
           rvc:          0.00s  ( 0.0%)  — optional, excluded from weight
         Actual completion status of each subsystem drives progress, not elapsed time.
+        Wall-clock boot time is used as an additional floor so the bar always moves
+        forward even before the first subsystem reaches "initializing".
         """
         WEIGHTS = {
             "imports":     60.53,
@@ -154,6 +164,17 @@ class StartupProgress:
                 expected = max(w, 1.0)
                 partial = min(elapsed / expected, 0.95)  # cap at 95% until actually complete
                 completed_weight += w * partial
+            elif sub.status == "pending":
+                # Even pending stages get a tiny floor from overall boot elapsed time
+                # so the bar begins moving as soon as the first status poll succeeds.
+                # This covers the gap where imports are "initializing" but no sub.start_time
+                # has been captured yet (sub.start_time == 0).
+                if sub.start_time == 0 and key == "imports":
+                    # Use total boot time as a proxy for import progress
+                    elapsed = time.time() - self.boot_start_time
+                    expected = max(WEIGHTS.get("imports", 60.53), 1.0)
+                    partial = min(elapsed / expected, 0.90)
+                    completed_weight += w * partial
         return int((completed_weight / total_weight) * 100)
 
     def get_status(self) -> Dict[str, Any]:

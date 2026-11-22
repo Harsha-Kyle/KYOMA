@@ -32,6 +32,16 @@ export default defineConfig({
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
         secure: false,
+        configure: (proxy) => {
+          proxy.on('error', (err, _req, _res) => {
+            // Suppress ECONNREFUSED during backend startup — avoid log spam
+            const code = (err as any)?.code;
+            if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EPIPE') {
+              return;
+            }
+            console.warn('[Vite API Proxy Error]', err.message);
+          });
+        },
       },
       "/ws": {
         target: "ws://127.0.0.1:8000",
