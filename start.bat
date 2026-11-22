@@ -5,11 +5,15 @@ set PYTHONUTF8=1
 title KYOMA AI - Future Gadget Laboratory
 color 06
 
+set "KYOMA_STATUS_FILE=%~dp0startup_status.json"
+if exist "%KYOMA_STATUS_FILE%" del /F /Q "%KYOMA_STATUS_FILE%" >nul 2>&1
+
 echo ========================================================
 echo                        KYOMA AI
 echo ========================================================
 echo Backend Server : http://localhost:8000
 echo Web Frontend   : http://localhost:5173
+echo Status File    : %KYOMA_STATUS_FILE%
 echo ========================================================
 echo.
 

@@ -391,8 +391,9 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoaded }) => {
             }, 600);
             return;
           } else {
-            // Backend reachable, show real backend stage and monotonic percentage (< 100)
-            const backendPct = typeof data.percentage === 'number' ? Math.min(99, data.percentage) : 10;
+            // Backend reachable or fallback status available
+            const rawPct = typeof data.percentage === 'number' ? data.percentage : (typeof data.percent === 'number' ? data.percent : 10);
+            const backendPct = Math.min(99, Math.max(0, rawPct));
             currentPct = Math.max(currentPct, backendPct);
             setProgress(currentPct);
             setSystemStateText(data.stage?.toUpperCase() || data.message?.toUpperCase() || "STARTING BACKEND DAEMON...");

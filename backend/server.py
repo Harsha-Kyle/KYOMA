@@ -24,6 +24,7 @@ for _l in ("uvicorn", "uvicorn.access", "uvicorn.error", "fastapi"):
 
 import time
 from services.lib.startup_progress import startup_progress
+startup_progress.set_stage("imports", "Importing python modules...")
 # Track import time
 start_time = time.time()
 total_start_time = time.time()
@@ -33,7 +34,9 @@ startup_progress.show_step("Importing python modules")
 import asyncio
 import traceback
 from services.ChatFetch.Chatfetch import ChatFetch
+startup_progress.sync_status_file()
 from services.Input.Input import VoiceInput
+startup_progress.sync_status_file()
 from services.Input.VisionInput import VisionInput
 from services.TTS.TTS import TTS
 from services.Memory.Memory import Memory
@@ -53,6 +56,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import secrets
 import uvicorn
 from services.LLM.LLM import LLM
+startup_progress.sync_status_file()
 from pydantic import BaseModel
 from datetime import datetime
 import json
@@ -136,6 +140,7 @@ async def lifespan(app: FastAPI):
         logger.warning(f"[Reminder] Could not register in-process voice services: {_re}")
 
     try:
+        startup_progress.set_stage("health_check", "Running startup health check...")
         await run_startup_health_check()
     except Exception as _e:
         logger.error(f"[HealthCheck] Error during startup health check: {_e}")
@@ -144,6 +149,7 @@ async def lifespan(app: FastAPI):
         def _warm():
             try:
                 import ollama
+                startup_progress.set_stage("gemma_warmup", "Warming up Gemma model...")
                 startup_progress.get_subsystem("model").start("Warming up Gemma model...")
                 logger.info("[Warmup] Warming up Ollama Gemma model in background...")
                 t_w0 = time.perf_counter()
@@ -160,6 +166,9 @@ async def lifespan(app: FastAPI):
             except Exception as _we:
                 startup_progress.get_subsystem("model").degrade(f"Warmup failed (non-critical): {_we}")
                 logger.warning(f"[Warmup] Gemma model warmup failed (non-critical): {_we}")
+            finally:
+                if startup_progress._check_readiness():
+                    startup_progress.set_stage("ready", "All systems ready")
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _warm)
 
@@ -256,6 +265,7 @@ app.mount("/resource", StaticFiles(directory="../frontend/dist/resource"), name=
 
 
 # Initialize Services
+startup_progress.set_stage("ai_services", "Initializing core AI pipeline...")
 start_time = time.time()
 startup_progress.get_subsystem("ai_services").start("Initializing voice, memory, TTS...")
 startup_progress.show_step("Loading AI Services")
@@ -1685,6 +1695,7 @@ SETTINGS_FILE = "settings.json"
 settings_manager = SettingsManager(SETTINGS_FILE)
 
 # Apply settings on startup
+startup_progress.set_stage("settings", "Applying persisted settings...")
 start_time = time.time()
 startup_progress.get_subsystem("settings").start("Applying persisted settings...")
 startup_progress.show_step("Applying Settings")
@@ -1693,6 +1704,7 @@ startup_progress.get_subsystem("settings").complete("Persisted settings active")
 startup_progress.complete_step(f"Settings applied in {time.time() - start_time:.2f}s")
 
 # Warm up TTS to reduce first request latency
+startup_progress.set_stage("tts_warmup", "Warming up TTS voice engine...")
 start_time = time.time()
 startup_progress.show_step("Warming up TTS")
 try:

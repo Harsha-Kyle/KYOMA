@@ -1,6 +1,8 @@
-# ============================================================
-# LocalAIVtuber2 - Root .gitignore
-# ============================================================
+# Startup Telemetry & Diagnostics
+startup_status.json
+startup_timings.json
+startup_status.json.tmp.*
+
 
 # ──────────────────────────────────────────────────────────
 # 🤖 AI MODEL WEIGHTS  (too large for GitHub, re-downloadable)
