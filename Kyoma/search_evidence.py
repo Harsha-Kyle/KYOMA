@@ -211,15 +211,29 @@ def _fetch_google_news(query_term: str) -> list:
     return results
 
 
-def _fetch_wikipedia(query_term: str) -> list:
+def _fetch_wikipedia(query_term: str, _deadline: float = 0.0) -> list:
+    """Fetch Wikipedia results, respecting a wall-clock deadline (seconds since epoch).
+    _deadline=0.0 means no deadline (legacy callers).  Internally enforced per sub-request.
+    """
     wiki_url = 'https://en.wikipedia.org/w/api.php'
     results = []
+
+    # Helper: seconds remaining until deadline (∞ if no deadline set)
+    def _remaining() -> float:
+        if _deadline <= 0:
+            return 999.0
+        return max(0.0, _deadline - time.time())
+
     try:
         clean_wq = re.sub(r'^(?:who|what|where|when|why|how)\s+(?:is|are|was|were)\s+(?:the\s+)?', '', query_term, flags=re.I)
         clean_wq = re.sub(r'[\?\!\.]+$', '', clean_wq).strip() or query_term
 
+        rem = _remaining()
+        if rem < 0.3:
+            return results  # No time left for even a search call
+
         p = {'action': 'query', 'list': 'search', 'srsearch': clean_wq, 'format': 'json', 'utf8': 1}
-        w_resp = requests.get(wiki_url, params=p, headers={'User-Agent': 'KyomaAI/2.0'}, timeout=2.5)
+        w_resp = requests.get(wiki_url, params=p, headers={'User-Agent': 'KyomaAI/2.0'}, timeout=min(2.5, rem - 0.1))
         if w_resp.status_code == 200:
             hits = w_resp.json().get('query', {}).get('search', [])
             if hits:
@@ -238,41 +252,49 @@ def _fetch_wikipedia(query_term: str) -> list:
                 if top_hit_title:
                     try:
                         headers = {'User-Agent': 'KyomaAI/2.0 (contact@example.com)'}
-                        ext_params = {
-                            'action': 'query',
-                            'prop': 'extracts',
-                            'exintro': 1,
-                            'explaintext': 1,
-                            'titles': top_hit_title,
-                            'format': 'json',
-                            'utf8': 1
-                        }
-                        ext_resp = requests.get(wiki_url, params=ext_params, headers=headers, timeout=2.0)
-                        if ext_resp.status_code == 200:
-                            pages = ext_resp.json().get('query', {}).get('pages', {})
-                            for pid, pdata in pages.items():
-                                top_extract = pdata.get('extract', '').strip()
-                                break
 
-                        # Authoritative infobox incumbent extraction from Wikipedia HTML
-                        safe_title = requests.utils.quote(top_hit_title.replace(' ', '_'))
-                        html_url = f"https://en.wikipedia.org/api/rest_v1/page/html/{safe_title}"
-                        h_resp = requests.get(html_url, headers=headers, timeout=2.5)
-                        if h_resp.status_code == 200:
-                            idx_inc = h_resp.text.find('Incumbent')
-                            if idx_inc != -1:
-                                chunk = h_resp.text[idx_inc:idx_inc+400]
-                                m_title = re.search(r'title="([^"]+)">([^<]+)</a>', chunk)
-                                if m_title:
-                                    incumbent_fact = f"Current Incumbent: {m_title.group(2).strip()}."
-                            if not incumbent_fact:
-                                m_ceo = re.search(r'>([^<]+)</a>\s*\([^\)]*CEO[^\)]*\)', h_resp.text, re.I)
-                                if m_ceo:
-                                    incumbent_fact = f"Chief Executive Officer (CEO): {m_ceo.group(1).strip()}."
-                                elif "Jensen Huang" in h_resp.text:
-                                    incumbent_fact = "Key Leader / CEO: Jensen Huang."
+                        # Sub-request 1: extract text
+                        rem = _remaining()
+                        if rem >= 0.4:
+                            ext_params = {
+                                'action': 'query',
+                                'prop': 'extracts',
+                                'exintro': 1,
+                                'explaintext': 1,
+                                'titles': top_hit_title,
+                                'format': 'json',
+                                'utf8': 1
+                            }
+                            ext_resp = requests.get(wiki_url, params=ext_params, headers=headers, timeout=min(2.0, rem - 0.1))
+                            if ext_resp.status_code == 200:
+                                pages = ext_resp.json().get('query', {}).get('pages', {})
+                                for pid, pdata in pages.items():
+                                    top_extract = pdata.get('extract', '').strip()
+                                    break
 
-                        if not incumbent_fact:
+                        # Sub-request 2: HTML infobox incumbent
+                        rem = _remaining()
+                        if rem >= 0.4:
+                            safe_title = requests.utils.quote(top_hit_title.replace(' ', '_'))
+                            html_url = f"https://en.wikipedia.org/api/rest_v1/page/html/{safe_title}"
+                            h_resp = requests.get(html_url, headers=headers, timeout=min(2.5, rem - 0.1))
+                            if h_resp.status_code == 200:
+                                idx_inc = h_resp.text.find('Incumbent')
+                                if idx_inc != -1:
+                                    chunk = h_resp.text[idx_inc:idx_inc+400]
+                                    m_title = re.search(r'title="([^"]+)">([^<]+)</a>', chunk)
+                                    if m_title:
+                                        incumbent_fact = f"Current Incumbent: {m_title.group(2).strip()}."
+                                if not incumbent_fact:
+                                    m_ceo = re.search(r'>([^<]+)</a>\s*\([^\)]*CEO[^\)]*\)', h_resp.text, re.I)
+                                    if m_ceo:
+                                        incumbent_fact = f"Chief Executive Officer (CEO): {m_ceo.group(1).strip()}."
+                                    elif "Jensen Huang" in h_resp.text:
+                                        incumbent_fact = "Key Leader / CEO: Jensen Huang."
+
+                        # Sub-request 3: wikitext fallback (only if still no incumbent AND time remains)
+                        rem = _remaining()
+                        if not incumbent_fact and rem >= 0.4:
                             parse_params = {
                                 'action': 'parse',
                                 'page': top_hit_title,
@@ -280,7 +302,7 @@ def _fetch_wikipedia(query_term: str) -> list:
                                 'section': 0,
                                 'format': 'json'
                             }
-                            p_resp = requests.get(wiki_url, params=parse_params, headers=headers, timeout=1.5)
+                            p_resp = requests.get(wiki_url, params=parse_params, headers=headers, timeout=min(1.5, rem - 0.1))
                             if p_resp.status_code == 200:
                                 wt = p_resp.json().get('parse', {}).get('wikitext', {}).get('*', '')
                                 m_inc = re.search(r'incumbent\s*=\s*\[\[([^\]\|]+)', wt, re.I)
@@ -351,17 +373,21 @@ def search_web_evidence(query: str, max_results: int = 3) -> dict:
             results.extend(w_res)
 
     # Parallel retrieval across News & Wikipedia with hard-cap at 3.0 seconds
+    # The deadline is passed into _fetch_wikipedia so its sequential sub-requests
+    # (search + extract + HTML + wikitext) also respect the overall budget.
+    _RETRIEVAL_BUDGET = 3.0
+    _deadline = time.time() + _RETRIEVAL_BUDGET
     futures = []
     with ThreadPoolExecutor(max_workers=4) as pool:
         # News queries
         for v in variants[:2]:
             futures.append(pool.submit(_fetch_google_news, v))
-        # Wikipedia queries
+        # Wikipedia queries — pass deadline so internal sub-requests are time-bounded
         for v in variants[:2]:
-            futures.append(pool.submit(_fetch_wikipedia, v))
+            futures.append(pool.submit(_fetch_wikipedia, v, _deadline))
 
         try:
-            for f in as_completed(futures, timeout=3.0):
+            for f in as_completed(futures, timeout=_RETRIEVAL_BUDGET):
                 try:
                     sub_results = f.result()
                     for item in sub_results:
