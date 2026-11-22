@@ -254,7 +254,7 @@ _RE_SCREENSHOT = re.compile(r"^(?:take\s+(?:a\s+)?|capture\s+(?:a\s+)?|grab\s+(?
 # ── Standby / Sleep & System Risk Patterns ─────────────────────────────────────
 _RE_SLEEP        = re.compile(r"^(?:go\s+to\s+sleep|sleep\s+mode|standby|enter\s+standby|take\s+a\s+nap)[\!\.\?\s]*$", _F)
 _RE_SYSTEM_RISK  = re.compile(r"\b(shutdown|shut\s+down|power\s+off|restart|reboot|hibernate)\b", _F)
-_RE_BARE_ADJUST  = re.compile(r"^(increase|raise|turn\s+up|boost|decrease|lower|turn\s+down|reduce|drop|dim)(?:\s+(?:it|that|this))?[\!\.\?\s]*$", _F)
+_RE_BARE_ADJUST  = re.compile(r"^(increase|increas|increass|raise|turn\s+up|boost|decrease|decreas|decreass|lower|turn\s+down|reduce|reduse|drop|dim)(?:\s+(?:it|that|this))?[\!\.\?\s]*$", _F)
 _RE_BARE_REMIND  = re.compile(r"^(?:set\s+(?:a\s+)?)?(?:reminder|alarm)[\!\.\?\s]*$", _F)
 # ── Reminders & Capabilities Patterns ─────────────────────────────────────────
 _RE_REMINDERS  = re.compile(r"\b(?:(?:list|show|view|check|read|get)(?:\s+all)?(?:\s+my)?\s+(?:reminders?|remainings?)|(?:reminders?|remainings?)\s+(?:list|status)|what\s+are\s+my\s+(?:reminders?|remainings?)|do\s+i\s+have\s+any\s+(?:reminders?|remainings?))\b", _F)
@@ -489,6 +489,15 @@ def route(text: str) -> Tuple[Optional[str], bool]:
     if not text or not text.strip():
         return None, False
     try:
+        from pending_actions import handle_pending_followup
+        p_resp, p_handled = handle_pending_followup(text)
+        if p_handled and p_resp:
+            _record_fast_router_turn(text, p_resp)
+            return p_resp, True
+    except Exception:
+        pass
+
+    try:
         cleaned = _normalize_speech_text(text)
         # Strip wake phrase if present at the start: "Hey Kyoma, " or "Kyoma, "
         cleaned = re.sub(r'^(?:hey\s+)?kyoma[\s,:\-]+', '', cleaned, flags=re.I).strip()
@@ -587,48 +596,17 @@ def _route(text: str) -> Tuple[Optional[str], bool]:
     # ── CONTEXTUAL SLOT-FILLING: BARE ADJUSTMENT ("Increase" / "Decrease") ──
     if m_adj := _RE_BARE_ADJUST.match(text):
         adj_word = m_adj.group(1).lower()
-        direction = "up" if adj_word in ("increase", "raise", "turn up", "boost") else "down"
-        try:
-            from pending_actions import get_last_controlled_target, record_controlled_target
-            last_target = get_last_controlled_target()
-        except Exception:
-            last_target = None
-
-        if last_target == "brightness":
-            try:
-                from display_control import brightness_up, brightness_down, get_brightness
-                if direction == "up":
-                    brightness_up(10)
-                else:
-                    brightness_down(10)
-                b = get_brightness()
-                m_b = re.search(r"(\d+)", str(b))
-                b_val = m_b.group(1) if m_b else b
-                record_controlled_target("brightness")
-                return f"{'Increased' if direction == 'up' else 'Decreased'} brightness to {b_val}%.", True
-            except Exception as e:
-                return f"Could not adjust brightness: {e}", True
-        elif last_target == "volume":
-            try:
-                from volume_control import change_volume, get_volume
-                delta = 10 if direction == "up" else -10
-                change_volume(delta)
-                v = get_volume()
-                record_controlled_target("volume")
-                return f"{'Increased' if direction == 'up' else 'Decreased'} volume to {v}%.", True
-            except Exception as e:
-                return f"Could not adjust volume: {e}", True
-
+        direction = "up" if adj_word in ("increase", "increas", "increass", "raise", "turn up", "boost") else "down"
         try:
             from pending_actions import set_pending_action
             set_pending_action(
                 action_type="slot_fill_adjustment",
                 data={"direction": direction},
-                prompt_to_user=f"{adj_word.title()} what? Volume or brightness?"
+                prompt_to_user="Volume or brightness?"
             )
         except Exception:
             pass
-        return f"{adj_word.title()} volume or brightness?", True
+        return "Volume or brightness?", True
 
     # ── CONTEXTUAL SLOT-FILLING: BARE REMINDER ("Set a reminder") ────────────
     if _RE_BARE_REMIND.match(text):
