@@ -3,6 +3,7 @@ import { SidebarProvider } from "@/components/ui/sidebar"
 import { AppSidebar } from "@/components/app-sidebar"
 import pageMapping from "@/constants/page-mapping"
 import { globalStateManager } from "@/lib/globalStateManager"
+import { pipelineManager } from "@/lib/pipelineManager"
 import { chatManager } from "@/lib/chatManager"
 import { useSettings } from "@/context/SettingsContext"
 import { Mic, Radio, HandMetal, Info } from "lucide-react"
@@ -59,10 +60,12 @@ function Mainpage() {
             const isThinking = globalStateManager.getState('isLLMThinking');
             const isSpeaking = globalStateManager.getState('isTTSPlaying');
             const isRec = globalStateManager.getState('isVoiceRecording');
+            const currentTask = pipelineManager.getCurrentTask();
+            const isPipelineBusy = !!currentTask && currentTask.status !== "task_finished" && currentTask.status !== "cancelled";
 
-            if (isThinking) {
+            if (isThinking || (isPipelineBusy && currentTask.status === "llm_started")) {
                 setSystemState("THINKING");
-            } else if (isSpeaking) {
+            } else if (isSpeaking || (isPipelineBusy && (currentTask.status === "llm_finished" || currentTask.status === "tts_finished"))) {
                 setSystemState("SPEAKING");
             } else if (isRec) {
                 setSystemState("LISTENING");
@@ -83,6 +86,9 @@ function Mainpage() {
         const unsubRec = globalStateManager.subscribe('isVoiceRecording', () => {
             updateDerivedState();
         });
+        const unsubPipeline = pipelineManager.subscribe(() => {
+            updateDerivedState();
+        });
         const unsubChat = chatManager.subscribe((messages) => {
             if (messages && messages.length > 0) {
                 const userMsgs = messages.filter((m) => m.role === 'user');
@@ -97,6 +103,7 @@ function Mainpage() {
             unsubLLM();
             unsubTTS();
             unsubRec();
+            unsubPipeline();
             unsubChat();
         };
     }, []);

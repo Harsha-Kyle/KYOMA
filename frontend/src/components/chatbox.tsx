@@ -259,13 +259,13 @@ const Chatbox = () => {
 
     // Dispatch the next message only after the previous answer's audio has completely finished
     useEffect(() => {
-        if (isTurnActive || isProcessing || isQueuePaused) return;
+        if (isTurnActive || isProcessing || isQueuePaused || editingQueueId !== null) return;
         if (messageQueue.length === 0) return;
 
         const nextItem = messageQueue[0];
         setMessageQueue(prev => prev.slice(1));
         dispatchMessage(nextItem.text);
-    }, [isTurnActive, isProcessing, isQueuePaused, messageQueue]);
+    }, [isTurnActive, isProcessing, isQueuePaused, editingQueueId, messageQueue]);
 
     const dispatchMessage = async (msgText: string) => {
         if (selectedSession) {
@@ -432,7 +432,7 @@ const Chatbox = () => {
                     </div>
                     <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
                         {messageQueue.map((item, qIdx) => (
-                            <div key={item.id} className="flex items-center justify-between gap-2 p-1.5 rounded bg-background/50 border border-border/30">
+                            <div key={item.id} className="queue-item flex items-center justify-between gap-2 p-1.5 rounded bg-background/50 border border-border/30">
                                 {editingQueueId === item.id ? (
                                     <div className="flex items-center gap-1 w-full">
                                         <Input
