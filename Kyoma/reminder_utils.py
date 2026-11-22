@@ -151,74 +151,81 @@ def _reminder_playback_worker():
         t_audio_start = time.time()
         # 1. Mute microphone before reminder playback
         log_event(f"🔊 [Reminder Stage 2/4] Muting microphone at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} for: '{text}'")
+        muted_successfully = False
         if _voice_input_instance is not None:
             try:
                 _voice_input_instance.mute()
+                muted_successfully = True
             except Exception as _me:
                 log_event(f"⚠️ [Reminder Mic Mute Error] {_me}")
         else:
             try:
                 requests.post("http://localhost:8000/api/record/mute", timeout=0.5)
+                muted_successfully = True
             except Exception:
                 pass
 
-        # 2. Retrieve pre-cached audio or synthesize on demand
-        audio_bytes = _reminder_audio_cache.pop(r_id, None) if r_id else None
-        if audio_bytes:
-            log_event(f"⚡ [Reminder Stage 3/4] Using pre-cached audio ({len(audio_bytes)} bytes) for: '{text}'")
-        else:
-            log_event(f"🔊 [Reminder Stage 3/4] Synthesizing speech via Kokoro for: '{text}'")
-            if _tts_instance is not None:
+        try:
+            # 2. Retrieve pre-cached audio or synthesize on demand
+            audio_bytes = _reminder_audio_cache.pop(r_id, None) if r_id else None
+            if audio_bytes:
+                log_event(f"⚡ [Reminder Stage 3/4] Using pre-cached audio ({len(audio_bytes)} bytes) for: '{text}'")
+            else:
+                log_event(f"🔊 [Reminder Stage 3/4] Synthesizing speech via Kokoro for: '{text}'")
+                if _tts_instance is not None:
+                    try:
+                        audio_bytes = _tts_instance.synthesize(text)
+                        if isinstance(audio_bytes, dict):
+                            log_event(f"⚠️ [Reminder TTS Direct Error] Returned dict: {audio_bytes}")
+                            audio_bytes = None
+                    except Exception as e:
+                        log_event(f"⚠️ [Reminder TTS Direct Error] {e}")
+
+                if not audio_bytes:
+                    try:
+                        resp = requests.post(
+                            "http://localhost:8000/api/tts",
+                            json={"text": text},
+                            timeout=10.0
+                        )
+                        if resp.status_code == 200 and resp.content:
+                            audio_bytes = resp.content
+                    except Exception as e:
+                        log_event(f"⚠️ [Reminder TTS HTTP Error] {e}")
+
+            # 3. Play audio
+            if audio_bytes and isinstance(audio_bytes, (bytes, bytearray)):
+                log_event(f"🔊 [Reminder Stage 4/4] Audio playback START at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} ({len(audio_bytes)} bytes)")
                 try:
-                    audio_bytes = _tts_instance.synthesize(text)
-                    if isinstance(audio_bytes, dict):
-                        log_event(f"⚠️ [Reminder TTS Direct Error] Returned dict: {audio_bytes}")
-                        audio_bytes = None
+                    winsound.PlaySound(audio_bytes, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+                    log_event(f"✅ [Reminder Playback Complete] Audio playback END at {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
                 except Exception as e:
-                    log_event(f"⚠️ [Reminder TTS Direct Error] {e}")
+                    log_event(f"⚠️ [Reminder PlaySound Error] {e}")
+            else:
+                log_event("⚠️ [Reminder Playback Error] No audio bytes available for playback!")
 
-            if not audio_bytes:
-                try:
-                    resp = requests.post(
-                        "http://localhost:8000/api/tts",
-                        json={"text": text},
-                        timeout=10.0
-                    )
-                    if resp.status_code == 200 and resp.content:
-                        audio_bytes = resp.content
-                except Exception as e:
-                    log_event(f"⚠️ [Reminder TTS HTTP Error] {e}")
+            # Keep mic muted during playback and for exactly 500ms afterward to prevent speaker bleed
+            time.sleep(0.5)
 
-        # 3. Play audio
-        if audio_bytes and isinstance(audio_bytes, (bytes, bytearray)):
-            log_event(f"🔊 [Reminder Stage 4/4] Audio playback START at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} ({len(audio_bytes)} bytes)")
-            try:
-                winsound.PlaySound(audio_bytes, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
-                log_event(f"✅ [Reminder Playback Complete] Audio playback END at {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
-            except Exception as e:
-                log_event(f"⚠️ [Reminder PlaySound Error] {e}")
-        else:
-            log_event("⚠️ [Reminder Playback Error] No audio bytes available for playback!")
-
-        # Keep mic muted during playback and for exactly 500ms afterward to prevent speaker bleed
-        time.sleep(0.5)
-
-        # 4. Unmute microphone and restore appropriate standby state based on input mode
-        log_event(f"🎙️ [Reminder Mic Restoration] Unmuting mic at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} (+500ms guard)")
-        if _voice_input_instance is not None:
-            try:
-                _voice_input_instance.unmute()
-                if getattr(_voice_input_instance, "input_mode", "wake_word") == "always_listening":
-                    _voice_input_instance.system_state = "LISTENING"
+        finally:
+            # 4. Unmute microphone — guaranteed even if synthesis or playback raised.
+            #    Only unmute if we successfully called mute() earlier (ref_count balance).
+            if muted_successfully:
+                log_event(f"🎙️ [Reminder Mic Restoration] Unmuting mic at {datetime.now().strftime('%H:%M:%S.%f')[:-3]} (+500ms guard)")
+                if _voice_input_instance is not None:
+                    try:
+                        _voice_input_instance.unmute()
+                        if getattr(_voice_input_instance, "input_mode", "wake_word") == "always_listening":
+                            _voice_input_instance.system_state = "LISTENING"
+                        else:
+                            _voice_input_instance.system_state = "IDLE"
+                    except Exception as _ume:
+                        log_event(f"⚠️ [Reminder Mic Unmute Error] {_ume}")
                 else:
-                    _voice_input_instance.system_state = "IDLE"
-            except Exception as _ume:
-                log_event(f"⚠️ [Reminder Mic Unmute Error] {_ume}")
-        else:
-            try:
-                requests.post("http://localhost:8000/api/record/unmute", timeout=0.5)
-            except Exception:
-                pass
+                    try:
+                        requests.post("http://localhost:8000/api/record/unmute", timeout=0.5)
+                    except Exception:
+                        pass
 
         _reminder_speech_queue.task_done()
 
@@ -396,9 +403,28 @@ def add_reminder(title: str, message: str, remind_time: str, recurrence: str = N
     """
     if recurrence is None:
         recurrence = "one time"
-    # Prevent context contamination: if message is empty, whitespace, or looks like conversation residue, default to title
-    clean_title = (title or "").strip()
-    clean_msg = (message or "").strip()
+
+    # Filler-word stripper: removes leading "to / about / that [I need to / ...]"
+    # that the LLM or voice recognition inserts into task descriptions.
+    # Examples:  "to go out tonight"  → "go out tonight"
+    #            "about the meeting"  → "meeting"
+    #            "that I need to call mom" → "call mom"
+    _FILLER_RE = re.compile(
+        r'^(?:to|about|that(?:\s+(?:i\s+need\s+to|i\s+have\s+to|i\s+should))?)\s+',
+        re.IGNORECASE
+    )
+    _DET_RE = re.compile(r'^(?:the|a|an)\s+', re.IGNORECASE)
+
+    def _strip_filler(text: str) -> str:
+        t = text.strip()
+        t = _FILLER_RE.sub('', t).strip()
+        t = _DET_RE.sub('', t).strip()
+        return t
+
+    clean_title = _strip_filler((title or "").strip())
+    raw_msg = (message or "").strip()
+    clean_msg = _strip_filler(raw_msg)
+    # If message is empty, identical to original title, or now identical to clean_title, use clean_title
     if not clean_msg or clean_msg == clean_title:
         clean_msg = clean_title
 
