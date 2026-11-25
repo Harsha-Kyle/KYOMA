@@ -136,3 +136,8 @@ backend/plugins/rvc/*.exe
 # Uncomment below if you want to exclude lock files:
 # package-lock.json
 # backend/package-lock.json
+
+# Protected Local Reminder Databases
+Kyoma/Reminders logs/reminders.db
+Kyoma/Reminders logs/reminders_demo.db
+reminders.db
